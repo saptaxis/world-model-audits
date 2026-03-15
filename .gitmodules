@@ -1,3 +1,4 @@
 [submodule "dreamerv3/vendor/r2dreamer"]
 	path = dreamerv3/vendor/r2dreamer
-	url = https://github.com/NM512/r2dreamer.git
+	url = git@github.com:saptaxis/r2dreamer.git
+	branch = lunar-lander
