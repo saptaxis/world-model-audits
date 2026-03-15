@@ -1,0 +1,32 @@
+name: wm-audits
+
+repos:
+  world-model-audits:
+    path: ~/Dropbox/code/world-model-audits
+    workdir: true
+  latent-world-geometry:
+    path: ~/Dropbox/traitful-code/latent-world-geometry
+    add_dir: true
+  traitful-docs:
+    path: ~/Dropbox/traitful-code/traitful-docs
+    add_dir: true
+  world-model-ladder:
+    path: ~/Dropbox/code/world-model-ladder
+    add_dir: true
+
+mounts:
+  - host: /media/hdd1/physics-priors-latent-space
+    container: /media/hdd1/physics-priors-latent-space
+
+python:
+  version: "3.12"
+  requirements: requirements.txt
+
+apt_packages:
+  - swig
+  - build-essential
+
+claude:
+  dangerously_skip_permissions: true
+  plugins:
+    - superpowers
