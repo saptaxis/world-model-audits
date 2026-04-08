@@ -17,6 +17,7 @@ from pathlib import Path
 
 import cv2
 import h5py
+import hdf5plugin
 import numpy as np
 from tqdm import tqdm
 
@@ -87,7 +88,8 @@ def convert(
             "pixels",
             shape=(total_frames, resize, resize, 3),
             dtype=np.uint8,
-            chunks=(1, resize, resize, 3),
+            chunks=(64, resize, resize, 3),
+            **hdf5plugin.Blosc(cname="lz4", clevel=5, shuffle=hdf5plugin.Blosc.SHUFFLE),
         )
         action_ds = f.create_dataset(
             "action",
