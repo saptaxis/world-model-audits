@@ -1,0 +1,13 @@
+# LeWorldModel dependencies
+# Venv: ~/virtual_envs/lewm
+
+# PyTorch — install with CUDA index first:
+# pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+
+# Core research libraries (install from GitHub):
+# pip install "stable-worldmodel[train] @ git+https://github.com/galilai-group/stable-worldmodel.git"
+# (this pulls in stable-pretraining as a dependency)
+
+# Additional
+einops
+lightning

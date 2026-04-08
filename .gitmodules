@@ -2,3 +2,6 @@
 	path = dreamerv3/vendor/r2dreamer
 	url = git@github.com:saptaxis/r2dreamer.git
 	branch = lunar-lander
+[submodule "lewm/vendor/le-wm"]
+	path = lewm/vendor/le-wm
+	url = git@github.com:saptaxis/le-wm.git
