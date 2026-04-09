@@ -30,6 +30,7 @@ def main():
     parser.add_argument("--output-dir", required=True, help="Where to save state head + results")
     parser.add_argument("--max-frames", type=int, default=50000, help="Max frames to encode (0=all)")
     parser.add_argument("--encode-batch-size", type=int, default=1024, help="Batch size for ViT encoding")
+    parser.add_argument("--val-split", type=float, default=0.1, help="Fraction held out for validation")
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--device", default="cuda")
     args = parser.parse_args()
@@ -59,11 +60,10 @@ def main():
     # Use first 6 dims only (kinematics)
     state_kin = state_all[:, :6]
 
-    # Train/val split (90/10)
     n = len(z_all)
     rng = np.random.default_rng(42)
     perm = rng.permutation(n)
-    split = int(0.9 * n)
+    split = int((1 - args.val_split) * n)
     z_train, z_val = z_all[perm[:split]], z_all[perm[split:]]
     s_train, s_val = state_kin[perm[:split]], state_kin[perm[split:]]
     print(f"Train: {len(z_train)}, Val: {len(z_val)}")
