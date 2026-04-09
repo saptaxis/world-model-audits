@@ -27,14 +27,54 @@ def encode_dataset(
     device: str = "cuda",
     batch_size: int = 256,
     max_frames: int = 0,
+    seed: int = 42,
 ):
-    """Encode frames and save (z, state) pairs."""
+    """Encode frames and save (z, state) pairs.
+
+    Samples random episodes (all frames per episode) up to max_frames total.
+    If max_frames=0, encodes everything.
+    """
+    import h5py
+    import hdf5plugin  # noqa: F401
+
     device = torch.device(device)
 
     model = torch.load(model_path, map_location=device, weights_only=False)
     model.eval()
 
     transform = get_img_preprocessor(source="pixels", target="pixels", img_size=224)
+
+    # Open HDF5 directly to get episode structure
+    datasets_dir = swm.data.utils.get_cache_dir(cache_dir, sub_folder="datasets")
+    h5_path = Path(datasets_dir) / f"{dataset_name}.h5"
+    with h5py.File(h5_path, "r") as f:
+        ep_len = f["ep_len"][:]
+        ep_offset = f["ep_offset"][:]
+    n_episodes = len(ep_len)
+    total_frames = int(ep_len.sum())
+
+    # Select random episodes up to max_frames
+    rng = np.random.default_rng(seed)
+    ep_order = rng.permutation(n_episodes)
+
+    if max_frames > 0:
+        selected_eps = []
+        frame_count = 0
+        for ep_idx in ep_order:
+            selected_eps.append(ep_idx)
+            frame_count += ep_len[ep_idx]
+            if frame_count >= max_frames:
+                break
+        selected_eps = sorted(selected_eps)
+        n_frames = frame_count
+    else:
+        selected_eps = list(range(n_episodes))
+        n_frames = total_frames
+
+    print(f"Encoding {n_frames} frames from {len(selected_eps)} random episodes "
+          f"(of {n_episodes} total, {total_frames} total frames)")
+
+    # Load via HDF5Dataset for proper transforms
     ds = swm.data.HDF5Dataset(
         name=dataset_name,
         num_steps=1,
@@ -44,19 +84,26 @@ def encode_dataset(
         transform=transform,
     )
 
-    n = len(ds) if max_frames <= 0 else min(len(ds), max_frames)
-    print(f"Encoding {n} frames from {dataset_name}...")
+    # Build flat frame indices from selected episodes
+    frame_indices = []
+    for ep_idx in selected_eps:
+        start = int(ep_offset[ep_idx])
+        length = int(ep_len[ep_idx])
+        frame_indices.extend(range(start, start + length))
+
+    n = len(frame_indices)
+    print(f"  {n} frames to encode")
 
     all_z = []
     all_states = []
 
     with torch.no_grad():
-        for start in tqdm(range(0, n, batch_size)):
-            end = min(start + batch_size, n)
+        for batch_start in tqdm(range(0, n, batch_size)):
+            batch_end = min(batch_start + batch_size, n)
             pixels_batch = []
             states_batch = []
-            for i in range(start, end):
-                sample = ds[i]
+            for i in range(batch_start, batch_end):
+                sample = ds[frame_indices[i]]
                 pixels_batch.append(sample["pixels"].squeeze(0))
                 states_batch.append(sample["state"].squeeze(0))
 
