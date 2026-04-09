@@ -29,6 +29,7 @@ def main():
     parser.add_argument("--cache-dir", default="/media/hdd1/physics-priors-latent-space/lunar-lander-data")
     parser.add_argument("--output-dir", required=True, help="Where to save state head + results")
     parser.add_argument("--max-frames", type=int, default=50000, help="Max frames to encode (0=all)")
+    parser.add_argument("--encode-batch-size", type=int, default=1024, help="Batch size for ViT encoding")
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--device", default="cuda")
     args = parser.parse_args()
@@ -49,6 +50,7 @@ def main():
             cache_dir=args.cache_dir,
             output_path=str(z_cache),
             device=args.device,
+            batch_size=args.encode_batch_size,
             max_frames=args.max_frames,
         )
         data = np.load(z_cache)
