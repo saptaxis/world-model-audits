@@ -87,26 +87,30 @@ def rollout_episodes(
         name=dataset_name,
         num_steps=seq_len,
         frameskip=1,
-        keys_to_load=["pixels", "action"],
+        keys_to_load=["pixels", "action", "state"],
         cache_dir=cache_dir,
         transform=transform,
     )
 
-    indices = np.linspace(0, len(ds) - 1, n_episodes, dtype=int)
+    # Sample random episodes (not evenly spaced clips)
+    rng = np.random.default_rng(42)
+    indices = rng.choice(len(ds), size=n_episodes, replace=False)
     results = []
 
     for idx in indices:
         sample = ds[int(idx)]
         pixels = sample["pixels"]
         actions = sample["action"]
+        gt_states = sample["state"].numpy()[:, :6]  # real GT kinematics
 
         rollout = rollout_episode(
             model, state_head, pixels, actions,
             device=device,
         )
+        rollout["actual_states"] = gt_states  # override with real GT
         rollout["actions"] = actions.numpy()
         results.append(rollout)
-        print(f"  episode {idx}: {len(pixels)} steps, "
+        print(f"  clip {idx}: {len(pixels)} steps, "
               f"final z-MSE={np.mean((rollout['z_pred'][-1] - rollout['z_gt'][-1])**2):.4f}")
 
     return results
