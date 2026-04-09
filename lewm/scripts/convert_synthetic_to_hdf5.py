@@ -23,7 +23,7 @@ import numpy as np
 from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from eval.synthetic_render import render_episode_synthetic
+from utils.synthetic_render import render_episode_synthetic
 
 
 def convert(
