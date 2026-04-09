@@ -11,3 +11,4 @@
 # Additional
 einops
 lightning
+imageio[ffmpeg]
