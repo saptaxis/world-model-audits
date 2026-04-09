@@ -106,7 +106,7 @@ def save_state_head(head: StateHead, metrics: dict, path: str):
 
 def load_state_head(path: str, device: str = "cpu") -> tuple[StateHead, dict]:
     """Load state head from checkpoint."""
-    ckpt = torch.load(path, map_location=device, weights_only=True)
+    ckpt = torch.load(path, map_location=device, weights_only=False)
     head = StateHead()
     head.load_state_dict(ckpt["model"])
     head.to(device)
