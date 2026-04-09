@@ -4,14 +4,14 @@ repos:
   world-model-audits:
     path: ~/Dropbox/code/world-model-audits
     workdir: true
-  latent-world-geometry:
-    path: ~/Dropbox/traitful-code/latent-world-geometry
+  latent-world-physics:
+    path: ~/Dropbox/code/latent-world-physics
+    add_dir: true
+  parametric-lunar-lander:
+    path: ~/Dropbox/code/parametric-lunar-lander
     add_dir: true
   traitful-docs:
     path: ~/Dropbox/traitful-code/traitful-docs
-    add_dir: true
-  world-model-ladder:
-    path: ~/Dropbox/code/world-model-ladder
     add_dir: true
 
 mounts:
