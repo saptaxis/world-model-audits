@@ -7,9 +7,11 @@ repos:
   latent-world-physics:
     path: ~/Dropbox/code/latent-world-physics
     add_dir: true
+    pip_install: true
   parametric-lunar-lander:
     path: ~/Dropbox/code/parametric-lunar-lander
     add_dir: true
+    pip_install: true
   traitful-docs:
     path: ~/Dropbox/traitful-code/traitful-docs
     add_dir: true
