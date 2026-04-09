@@ -20,5 +20,5 @@ imageio
 torchrl>=0.9.2
 tensordict>=0.9.1
 
-# LeWorldModel (E5) — install from GitHub in container setup
-# pip install "stable-worldmodel[train] @ git+https://github.com/galilai-group/stable-worldmodel.git"
+# LeWorldModel (E5)
+stable-worldmodel[train] @ git+https://github.com/galilai-group/stable-worldmodel.git
