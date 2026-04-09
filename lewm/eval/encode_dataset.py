@@ -94,8 +94,17 @@ def encode_dataset(
     n = len(frame_indices)
     print(f"  {n} frames to encode")
 
-    all_z = []
-    all_states = []
+    # Pre-allocate arrays to avoid growing lists in RAM
+    # Detect z_dim from a single forward pass
+    with torch.no_grad():
+        sample = ds[frame_indices[0]]
+        px = sample["pixels"].squeeze(0).unsqueeze(0).to(device)
+        out = model.encoder(px, interpolate_pos_encoding=True)
+        z_dim = model.projector(out.last_hidden_state[:, 0]).shape[1]
+    state_dim = 15
+
+    z_array = np.empty((n, z_dim), dtype=np.float32)
+    state_array = np.empty((n, state_dim), dtype=np.float32)
 
     with torch.no_grad():
         for batch_start in tqdm(range(0, n, batch_size)):
@@ -113,11 +122,8 @@ def encode_dataset(
             output = model.encoder(pixels, interpolate_pos_encoding=True)
             z = model.projector(output.last_hidden_state[:, 0])
 
-            all_z.append(z.cpu().numpy())
-            all_states.append(states.numpy())
-
-    z_array = np.concatenate(all_z, axis=0)
-    state_array = np.concatenate(all_states, axis=0)
+            z_array[batch_start:batch_end] = z.cpu().numpy()
+            state_array[batch_start:batch_end] = states.numpy()
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     np.savez(output_path, z=z_array, state=state_array)
