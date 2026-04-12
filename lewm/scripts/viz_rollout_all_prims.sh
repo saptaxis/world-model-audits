@@ -1,6 +1,7 @@
 #!/bin/bash
 # Rollout viz on all primitives datasets using the synthetic-heuristic encoder.
 # Tests generalization: encoder/predictor trained on heuristic, evaluated on prims.
+# seq_len per dataset chosen based on episode length distribution at frameskip=10.
 set -e
 
 source ~/virtual_envs/lewm/bin/activate
@@ -12,8 +13,10 @@ CACHE=/home/vsr/vsr-tmp/lewm-datasets
 OUTBASE=/media/hdd1/physics-priors-latent-space/lunar-lander-networks/lewm-runs/synthetic-heuristic-fs10/rollout_viz_prims
 GPU=${1:-1}
 
-for ds in free-fall ground-stationary ground-liftoff ground-side-thrust ground-thrust-sweep impulse-main impulse-side random; do
-    echo "=== $ds ==="
+run_viz() {
+    local ds=$1
+    local seqlen=$2
+    echo "=== $ds (seq_len=$seqlen) ==="
     CUDA_VISIBLE_DEVICES=$GPU python lewm/scripts/viz_rollout.py \
         --model $MODEL \
         --state-head $SH \
@@ -21,11 +24,24 @@ for ds in free-fall ground-stationary ground-liftoff ground-side-thrust ground-t
         --cache-dir $CACHE \
         --output-dir $OUTBASE/$ds \
         --n-episodes 5 \
-        --seq-len 50 \
+        --seq-len $seqlen \
         --frameskip 10 \
         --start-mode episode_start \
         --device cuda
     echo ""
-done
+}
+
+#                dataset                seq_len  (based on p10 episode length / 10)
+run_viz          ground-stationary      15
+run_viz          ground-side-thrust     15
+run_viz          ground-liftoff         8
+run_viz          ground-thrust-sweep    8
+run_viz          random                 7
+run_viz          impulse-main           4
+run_viz          free-fall              4
+run_viz          impulse-side           4
+
+# Also re-run heuristic for comparison
+run_viz          heuristic              15
 
 echo "All done. Videos at $OUTBASE/"
