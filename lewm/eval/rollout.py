@@ -72,6 +72,7 @@ def rollout_episodes(
     cache_dir: str,
     n_episodes: int = 5,
     seq_len: int = 50,
+    frameskip: int = 10,
     device: str = "cuda",
 ) -> list[dict]:
     """Rollout multiple episodes and return results."""
@@ -86,7 +87,7 @@ def rollout_episodes(
     ds = swm.data.HDF5Dataset(
         name=dataset_name,
         num_steps=seq_len,
-        frameskip=1,
+        frameskip=frameskip,
         keys_to_load=["pixels", "action", "state"],
         cache_dir=cache_dir,
         transform=transform,
