@@ -33,6 +33,7 @@ def main():
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--n-episodes", type=int, default=5)
     parser.add_argument("--seq-len", type=int, default=50)
+    parser.add_argument("--frameskip", type=int, default=10)
     parser.add_argument("--device", default="cuda")
     args = parser.parse_args()
 
@@ -47,6 +48,7 @@ def main():
         cache_dir=args.cache_dir,
         n_episodes=args.n_episodes,
         seq_len=args.seq_len,
+        frameskip=args.frameskip,
         device=args.device,
     )
 
