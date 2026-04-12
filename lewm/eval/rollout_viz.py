@@ -120,8 +120,12 @@ def render_trajectory_video(
     When actions are provided, renders a right-side annotation panel showing
     the action being applied, predicted vs GT state values, and per-step MSE.
 
+    When rollout contains "rgb_frames" (T, H, W, 3) uint8 array, an RGB
+    panel is prepended to the left showing the original environment frame.
+
     Args:
         rollout: Dict with "predicted_states" and "actual_states" arrays.
+            Optional "rgb_frames": (T, H, W, 3) uint8 array of original frames.
         output_path: MP4 output path.
         fps: Frames per second (50 matches Box2D physics tick).
         canvas_size: (width, height) of the trajectory view (left panel).
@@ -137,6 +141,7 @@ def render_trajectory_video(
 
     predicted = rollout["predicted_states"]
     actual = rollout["actual_states"]
+    rgb_frames = rollout.get("rgb_frames")  # (T, H, W, 3) uint8 or None
     W, H = canvas_size
     T = len(predicted)
 
@@ -144,16 +149,24 @@ def render_trajectory_video(
         dim_names = KINEMATIC_DIM_NAMES
 
     show_panel = actions is not None
+    show_rgb = rgb_frames is not None
     # Side panel width — only allocated when we have actions.
     panel_w = 280 if show_panel else 0
-    total_w = W + panel_w
+    # RGB panel: scale to match canvas height
+    rgb_w = 0
+    if show_rgb:
+        rgb_h_orig, rgb_w_orig = rgb_frames.shape[1], rgb_frames.shape[2]
+        rgb_scale = H / rgb_h_orig
+        rgb_w = int(rgb_w_orig * rgb_scale)
+    total_w = rgb_w + W + panel_w
     # Ensure even dimensions for libx264.
     total_w += total_w % 2
     canvas_h = H + (H % 2)
 
     # Coordinate mapping: Lunar Lander x ∈ [-1, 1], y ∈ [0, 1.5] roughly.
+    # Offset by rgb_w so schematic draws in the right part of the frame.
     def world_to_canvas(x, y):
-        cx = int((x + 1.5) / 3.0 * W)
+        cx = rgb_w + int((x + 1.5) / 3.0 * W)
         cy = int((1.5 - y) / 1.8 * H)
         return cx, cy
 
@@ -181,6 +194,16 @@ def render_trajectory_video(
     for t in range(T):
         img = Image.new("RGB", (total_w, canvas_h), "#1a1a2e")
         draw = ImageDraw.Draw(img)
+
+        # RGB panel (left side, if available).
+        if show_rgb and t < len(rgb_frames):
+            rgb_img = Image.fromarray(rgb_frames[t]).resize(
+                (rgb_w, H), Image.LANCZOS
+            )
+            img.paste(rgb_img, (0, 0))
+            draw.text((4, 4), "RGB", fill="white", font=font)
+            # Separator line
+            draw.line([(rgb_w - 1, 0), (rgb_w - 1, canvas_h)], fill="#3a3a4a", width=1)
 
         # Ground line + landing pad.
         gx0, gy = world_to_canvas(-1.5, 0)
@@ -219,18 +242,18 @@ def render_trajectory_video(
         # Text overlay on trajectory panel.
         n_common = min(predicted.shape[1], actual.shape[1])
         mse = float(np.mean((predicted[t, :n_common] - actual[t, :n_common]) ** 2))
-        draw.text((10, 10), f"t={t:03d}  MSE={mse:.4f}", fill="white", font=font)
+        draw.text((rgb_w + 10, 10), f"t={t:03d}  MSE={mse:.4f}", fill="white", font=font)
         if title:
-            draw.text((10, 28), title, fill="#888888", font=font)
-        draw.text((W - 160, H - 40), "GT", fill="#2196F3", font=font)
-        draw.text((W - 160, H - 22), "Pred", fill="#F44336", font=font)
+            draw.text((rgb_w + 10, 28), title, fill="#888888", font=font)
+        draw.text((rgb_w + W - 160, H - 40), "GT", fill="#2196F3", font=font)
+        draw.text((rgb_w + W - 160, H - 22), "Pred", fill="#F44336", font=font)
 
         # --- Side panel ---
         if show_panel:
             # Vertical separator line.
-            draw.line([(W, 0), (W, canvas_h)], fill="#3a3a4a", width=1)
+            draw.line([(rgb_w + W, 0), (rgb_w + W, canvas_h)], fill="#3a3a4a", width=1)
 
-            x0 = W + 10
+            x0 = rgb_w + W + 10
             y_pos = 8
             line_h = 18
             small_line_h = 16

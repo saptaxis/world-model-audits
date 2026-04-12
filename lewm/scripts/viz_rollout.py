@@ -34,13 +34,18 @@ def main():
     parser.add_argument("--n-episodes", type=int, default=5)
     parser.add_argument("--seq-len", type=int, default=50)
     parser.add_argument("--frameskip", type=int, default=10)
+    parser.add_argument("--start-mode", default="random",
+                        choices=["random", "episode_start", "episode_mid"],
+                        help="Where to start clips within episodes")
+    parser.add_argument("--rgb-dataset", default=None,
+                        help="HDF5 dataset name for RGB frames (optional)")
     parser.add_argument("--device", default="cuda")
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"Rolling out {args.n_episodes} episodes...")
+    print(f"Rolling out {args.n_episodes} episodes (start_mode={args.start_mode})...")
     results = rollout_episodes(
         model_path=args.model,
         state_head_path=args.state_head,
@@ -49,6 +54,8 @@ def main():
         n_episodes=args.n_episodes,
         seq_len=args.seq_len,
         frameskip=args.frameskip,
+        start_mode=args.start_mode,
+        rgb_dataset_name=args.rgb_dataset,
         device=args.device,
     )
 
