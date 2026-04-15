@@ -19,6 +19,8 @@ repos:
 mounts:
   - host: /media/hdd1/physics-priors-latent-space
     container: /media/hdd1/physics-priors-latent-space
+  - host: ~/vsr-tmp
+    container: /home/scad/vsr-tmp
 
 python:
   version: "3.12"
