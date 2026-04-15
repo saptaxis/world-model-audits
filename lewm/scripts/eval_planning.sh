@@ -33,6 +33,7 @@ shift $(( $# < 4 ? $# : 4 ))
 
 export STABLEWM_HOME=/media/hdd1/physics-priors-latent-space/lunar-lander-data
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
+export PYTHONPATH=/workspace/world-model-audits:${PYTHONPATH:-}
 
 cd /workspace/world-model-audits/lewm/vendor/le-wm
 
