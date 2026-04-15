@@ -16,17 +16,22 @@ KIN_DIM_NAMES = ["x", "y", "vx", "vy", "angle", "ang_vel"]
 
 
 class StateHead(nn.Module):
-    """Small MLP: z (192) → kinematic state (6)."""
+    """Probe: z → kinematic state. MLP or linear."""
 
-    def __init__(self, z_dim: int = 192, hidden: int = 128, state_dim: int = 6):
+    def __init__(self, z_dim: int = 192, hidden: int = 128, state_dim: int = 6,
+                 linear: bool = False):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(z_dim, hidden),
-            nn.ReLU(),
-            nn.Linear(hidden, hidden),
-            nn.ReLU(),
-            nn.Linear(hidden, state_dim),
-        )
+        self.linear = linear
+        if linear:
+            self.net = nn.Linear(z_dim, state_dim)
+        else:
+            self.net = nn.Sequential(
+                nn.Linear(z_dim, hidden),
+                nn.ReLU(),
+                nn.Linear(hidden, hidden),
+                nn.ReLU(),
+                nn.Linear(hidden, state_dim),
+            )
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
         return self.net(z)
@@ -41,10 +46,11 @@ def train_state_head(
     lr: float = 1e-3,
     batch_size: int = 512,
     device: str = "cuda",
+    linear: bool = False,
 ) -> tuple[StateHead, dict]:
     """Train state head and return model + R² scores."""
     device = torch.device(device)
-    head = StateHead(z_dim=z_train.shape[1]).to(device)
+    head = StateHead(z_dim=z_train.shape[1], linear=linear).to(device)
     optimizer = torch.optim.Adam(head.parameters(), lr=lr)
 
     z_t = torch.from_numpy(z_train).float()
