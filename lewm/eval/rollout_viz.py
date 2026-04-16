@@ -332,3 +332,177 @@ def render_trajectory_video(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     iio.imwrite(str(output_path), frames, fps=fps,
                 codec="libx264", macro_block_size=1)
+
+
+def render_planner_trajectory_video(
+    planner_states: np.ndarray,   # (T+1, 6) kinematic trajectory of planner
+    dataset_states: np.ndarray,   # (T+1, 6) dataset reference trajectory
+    goal_state: np.ndarray,       # (6,) kinematic goal state
+    planner_actions: np.ndarray,  # (T, A) per-step action
+    planner_costs: np.ndarray,    # (T,) per-step CEM cost
+    output_path: "str | Path",
+    title: str = "Planner vs Heuristic",
+    fps: int = 10,
+    size: int = 480,
+):
+    """Render an annotated schematic video of planner vs dataset trajectories.
+
+    Layout per frame:
+      - Left panel (size x size): schematic 2D world with planner triangle
+        (red + trail), dataset triangle (blue + trail), goal marker (star).
+      - Right panel (size x size//2): text side-panel with
+          * timestep / total
+          * planner kinematics (x, y, vx, vy, angle)
+          * dataset (reference) kinematics
+          * last action as bars
+          * cost so far as mini line plot
+    """
+    import imageio.v3 as iio
+    from PIL import Image, ImageDraw
+
+    T_plus_1 = len(planner_states)
+    frames = []
+    cost_history = []
+
+    for t in range(T_plus_1):
+        panel_world = _draw_world_panel(
+            planner_state=planner_states[t],
+            dataset_state=dataset_states[t],
+            goal_state=goal_state,
+            size=size,
+            planner_trail=planner_states[:t + 1, :2],
+            dataset_trail=dataset_states[:t + 1, :2],
+        )
+
+        cost_history.append(
+            float(planner_costs[min(t, len(planner_costs) - 1)])
+            if t < len(planner_costs) else float(planner_costs[-1])
+        )
+        panel_info = _draw_info_panel(
+            t=t, T=T_plus_1 - 1,
+            planner_state=planner_states[t],
+            dataset_state=dataset_states[t],
+            goal_state=goal_state,
+            last_action=planner_actions[min(t, len(planner_actions) - 1)]
+                if t < len(planner_actions) else planner_actions[-1],
+            cost_history=cost_history,
+            size=(size // 2, size),
+        )
+
+        combined = Image.new("RGB", (size + size // 2, size), (255, 255, 255))
+        combined.paste(panel_world, (0, 0))
+        combined.paste(panel_info, (size, 0))
+        frames.append(np.array(combined))
+
+    iio.imwrite(str(output_path), frames, fps=fps, codec="libx264", macro_block_size=1)
+
+
+def _draw_world_panel(
+    planner_state, dataset_state, goal_state, size,
+    planner_trail, dataset_trail,
+):
+    from PIL import Image, ImageDraw
+    img = Image.new("RGB", (size, size), (230, 230, 240))
+    draw = ImageDraw.Draw(img)
+
+    margin = 40
+    def to_px(x, y):
+        px = int(margin + (x + 1.0) / 2.0 * (size - 2 * margin))
+        py = int((size - margin) - y / 1.5 * (size - 2 * margin))
+        return px, py
+
+    # Ground line
+    ground_y = to_px(0, 0)[1]
+    draw.line([(0, ground_y), (size, ground_y)], fill=(80, 80, 80), width=2)
+
+    # Landing pad (gym-default at x=0, half-width ~0.1)
+    lp_l = to_px(-0.1, 0)
+    lp_r = to_px(0.1, 0)
+    draw.line([lp_l, (lp_r[0], lp_l[1])], fill=(220, 40, 40), width=4)
+
+    # Trails
+    def draw_trail(trail, color):
+        if len(trail) < 2:
+            return
+        pts = [to_px(float(x), float(y)) for x, y in trail]
+        draw.line(pts, fill=color, width=1)
+
+    draw_trail(planner_trail, (220, 60, 60))
+    draw_trail(dataset_trail, (60, 120, 220))
+
+    def draw_triangle(state, color, r=12):
+        import math
+        x, y, _, _, angle = state[0], state[1], state[2], state[3], state[4]
+        cx, cy = to_px(float(x), float(y))
+        pts = []
+        for k in range(3):
+            a = -float(angle) + k * (2 * math.pi / 3) - math.pi / 2
+            pts.append((cx + r * math.cos(a), cy + r * math.sin(a)))
+        draw.polygon(pts, fill=color, outline=(20, 20, 20))
+
+    draw_triangle(dataset_state, (60, 120, 220))
+    draw_triangle(planner_state, (220, 60, 60))
+
+    import math
+    gx, gy = to_px(float(goal_state[0]), float(goal_state[1]))
+    r = 14
+    star_pts = []
+    for k in range(10):
+        angle = -math.pi / 2 + k * math.pi / 5
+        rr = r if k % 2 == 0 else r / 2.4
+        star_pts.append((gx + rr * math.cos(angle), gy + rr * math.sin(angle)))
+    draw.polygon(star_pts, fill=(255, 200, 0), outline=(120, 90, 0))
+
+    font = _get_font(size=14)
+    draw.text((5, 5), "Red = planner", fill=(180, 0, 0), font=font)
+    draw.text((5, 20), "Blue = heuristic (dataset)", fill=(0, 60, 180), font=font)
+    draw.text((5, 35), "Gold star = goal", fill=(150, 100, 0), font=font)
+
+    return img
+
+
+def _draw_info_panel(t, T, planner_state, dataset_state, goal_state,
+                     last_action, cost_history, size):
+    from PIL import Image, ImageDraw
+    W, H = size
+    img = Image.new("RGB", (W, H), (250, 250, 250))
+    draw = ImageDraw.Draw(img)
+    font = _get_font(14)
+    bold = _get_font(16)
+
+    y = 10
+    draw.text((10, y), f"t = {t}/{T}", fill="black", font=bold); y += 22
+
+    draw.text((10, y), "Planner state:", fill=(180, 0, 0), font=bold); y += 18
+    for name, val in zip(["x", "y", "vx", "vy", "angle"], planner_state[:5]):
+        draw.text((20, y), f"{name:6s} = {float(val):+.3f}", fill="black", font=font); y += 15
+    y += 6
+
+    draw.text((10, y), "Heuristic state:", fill=(0, 60, 180), font=bold); y += 18
+    for name, val in zip(["x", "y", "vx", "vy", "angle"], dataset_state[:5]):
+        draw.text((20, y), f"{name:6s} = {float(val):+.3f}", fill="black", font=font); y += 15
+    y += 6
+
+    draw.text((10, y), "Goal:", fill=(150, 100, 0), font=bold); y += 18
+    for name, val in zip(["x", "y", "vx", "vy", "angle"], goal_state[:5]):
+        draw.text((20, y), f"{name:6s} = {float(val):+.3f}", fill="black", font=font); y += 15
+    y += 6
+
+    draw.text((10, y), "Last action (main/side):", fill="black", font=bold); y += 18
+    for name, val in zip(["main", "side"], last_action[:2]):
+        draw.text((20, y), f"{name:4s}: {_action_bar(float(val))}", fill="black", font=font); y += 15
+    y += 10
+
+    draw.text((10, y), "Cost:", fill="black", font=bold); y += 18
+    if len(cost_history) > 1:
+        plot_w = W - 20
+        plot_h = 60
+        cost_arr = np.asarray(cost_history)
+        cmin, cmax = float(cost_arr.min()), float(cost_arr.max() + 1e-9)
+        xs = np.linspace(10, 10 + plot_w, len(cost_arr))
+        ys = y + plot_h - (cost_arr - cmin) / (cmax - cmin + 1e-9) * plot_h
+        pts = list(zip(xs.tolist(), ys.tolist()))
+        draw.line(pts, fill=(40, 40, 40), width=1)
+        draw.rectangle([(10, y), (10 + plot_w, y + plot_h)], outline=(120, 120, 120))
+
+    return img
