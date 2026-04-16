@@ -105,7 +105,8 @@ def evaluate_replay(
             dataset_goal_pixels[i] = pixels_all[goal_idx]
 
     # --- reset env with per-episode seeds (array of seeds, one per env) ---
-    world.envs.reset(seed=ep_seeds_selected.tolist())
+    # Use world.reset (not world.envs.reset) so world.infos/states are populated.
+    world.reset(seed=ep_seeds_selected.tolist())
 
     # --- encode goal frames once (batched) ---
     goal_pixels_t = torch.from_numpy(dataset_goal_pixels).float().to(device)
@@ -121,8 +122,12 @@ def evaluate_replay(
     planner_states = np.zeros(
         (cfg.n_episodes, T + 1, state_dim), dtype=np.float32
     )
+    # WorldModelPolicy returns one action per world.step() call (shape
+    # (n_envs, act_dim)); the action_block expansion is already unrolled by
+    # its internal buffer. Log one action per outer step.
+    act_dim = int(np.prod(world.envs.single_action_space.shape))
     planner_actions = np.zeros(
-        (cfg.n_episodes, T, world.envs.single_action_space.shape[0] * cfg.frameskip),
+        (cfg.n_episodes, T, act_dim),
         dtype=np.float32,
     )
     planner_costs = np.zeros((cfg.n_episodes, T), dtype=np.float32)
@@ -131,22 +136,42 @@ def evaluate_replay(
     initial_info = world.infos
     planner_states[:, 0, :] = _extract_state(initial_info, cfg.n_episodes, state_dim)
 
+    # Prepare goal to inject into info each step. MegaWrapper yields
+    # info['pixels'] with shape (n_envs, history, H, W, 3); goal should
+    # broadcast to the same shape so WorldModelPolicy's transform works.
+    pixels_shape = np.asarray(world.infos["pixels"]).shape  # (n, H_hist, H, W, 3)
+    history = pixels_shape[1]
+    goal_broadcast = np.broadcast_to(
+        dataset_goal_pixels[:, None, ...], (cfg.n_episodes, history) + dataset_goal_pixels.shape[1:]
+    ).copy()
+
     # --- run planner loop ---
     world.set_policy(policy)
+    # Wrap get_action to capture the last action emitted by the planner.
+    last_action_box = {"val": None}
+    _orig_get_action = policy.get_action
+
+    def _capture_get_action(info):
+        a = _orig_get_action(info)
+        last_action_box["val"] = np.asarray(a)
+        return a
+
+    policy.get_action = _capture_get_action  # type: ignore[assignment]
+
     for t in range(T):
+        # Inject goal into infos so WorldModelPolicy's get_action sees it.
+        world.infos["goal"] = goal_broadcast
         # At each step, world.step() triggers policy.get_action(info) → solver.plan → env.step
-        step_result = world.step()  # advances env by action_block env steps
+        world.step()  # advances env by action_block env steps
         info = world.infos
         planner_states[:, t + 1, :] = _extract_state(info, cfg.n_episodes, state_dim)
-        # Log action and cost (from policy internal state)
-        last_action = policy.last_action if hasattr(policy, "last_action") else np.zeros(
-            planner_actions.shape[2:])
-        # Note: action is (n_envs, action_dim*frameskip) after WorldModelPolicy reshape
-        planner_actions[:, t, :] = np.asarray(last_action).reshape(
-            cfg.n_episodes, -1)
-        # Cost comes from solver.last_cost (best elite). If solver doesn't expose
-        # it, fall back to recomputing in finalize step below.
-        if hasattr(policy.solver, "last_cost"):
+        # Capture action from wrapper. Shape may be (n_envs, action_block, act_dim)
+        # or (n_envs, act_dim*action_block); flatten to match log layout.
+        la = last_action_box["val"]
+        if la is not None:
+            planner_actions[:, t, :] = la.reshape(cfg.n_episodes, -1)
+        # planner_costs: solver usually does not expose last_cost; leave zeros.
+        if hasattr(policy, "solver") and hasattr(policy.solver, "last_cost"):
             planner_costs[:, t] = np.asarray(policy.solver.last_cost)
 
     # --- compute final distances + success flags ---
