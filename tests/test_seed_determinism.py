@@ -1,4 +1,6 @@
 """Verify ParametricLunarLander(seed=X) reproduces dataset state at step 0."""
+import os
+
 import h5py
 import hdf5plugin  # noqa: F401
 import numpy as np
@@ -16,6 +18,8 @@ def test_reset_seed_matches_dataset_step_0():
         "/media/hdd1/physics-priors-latent-space/lunar-lander-data/datasets/"
         "lunarlander_synthetic_heuristic.h5"
     )
+    if not os.path.exists(h5_path):
+        pytest.skip(f"dataset not available at {h5_path}")
     with h5py.File(h5_path, "r") as f:
         if "ep_seed" not in f:
             pytest.skip("ep_seed not augmented yet")

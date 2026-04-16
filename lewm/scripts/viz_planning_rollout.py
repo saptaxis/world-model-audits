@@ -11,11 +11,12 @@ import argparse
 from pathlib import Path
 import sys
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+# Repo root for `lewm.*` imports
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 import numpy as np
 
-from eval.rollout_viz import render_planner_trajectory_video
+from lewm.eval.rollout_viz import render_planner_trajectory_video
 
 
 def main():

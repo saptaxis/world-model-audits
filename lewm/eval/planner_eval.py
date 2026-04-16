@@ -8,6 +8,7 @@ No video rendering here — see lewm/scripts/viz_planning_rollout.py.
 """
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -45,7 +46,7 @@ class ReplayConfig:
     z_success_threshold: float  # ||z_planner - z_goal|| success bound
     kin_success_threshold: float
     kin_weights: np.ndarray  # (6,) weighting for kinematic distance
-    seed: int = 42
+    seed: int  # required — caller must pass (typically from cfg.seed)
 
 
 def evaluate_replay(
@@ -63,6 +64,18 @@ def evaluate_replay(
         model: LeWM instance with .encode() and access to projector.
         cfg: ReplayConfig.
         device: torch device for encoding.
+
+    **Env contract:** Assumes `world.envs` is wrapped by `MegaWrapper` with
+    `history_size >= 1`. The function injects `dataset_goal_pixels` into
+    `world.infos["goal"]` each step, broadcasting to shape
+    `(n_envs, history_size, H, W, 3)` to match the history dim.
+
+    **Action capture:** The wrapper accumulates all calls to
+    `policy.get_action` within each `world.step()` — so we log per-step
+    actions of shape `(n_envs, action_block, action_dim)` rather than only
+    the last action. If the capture buffer length after a step does not
+    equal `cfg.frameskip`, the logged row falls back to the last captured
+    action broadcast across the block dim (and a warning is emitted once).
 
     Returns:
         dict with keys per RESULT_KEYS. Also saved externally by caller if needed.
@@ -98,8 +111,9 @@ def evaluate_replay(
         )
         for i, ep_idx in enumerate(picks):
             base = int(ep_offset[ep_idx])
-            for t in range(T + 1):
-                dataset_states[i, t] = state_all[base + t * cfg.frameskip]
+            # Single fancy-indexed read: T+1 frames strided by frameskip.
+            indices = np.arange(T + 1) * cfg.frameskip + base
+            dataset_states[i] = state_all[indices]
             goal_idx = base + cfg.goal_offset_steps * cfg.frameskip
             dataset_goal_states[i] = state_all[goal_idx]
             dataset_goal_pixels[i] = pixels_all[goal_idx]
@@ -122,15 +136,24 @@ def evaluate_replay(
     planner_states = np.zeros(
         (cfg.n_episodes, T + 1, state_dim), dtype=np.float32
     )
-    # WorldModelPolicy returns one action per world.step() call (shape
-    # (n_envs, act_dim)); the action_block expansion is already unrolled by
-    # its internal buffer. Log one action per outer step.
+    # Log all action_block actions per outer step. world.step() calls
+    # policy.get_action `action_block` times internally; the wrapper below
+    # accumulates every call into action_buffer.
     act_dim = int(np.prod(world.envs.single_action_space.shape))
     planner_actions = np.zeros(
-        (cfg.n_episodes, T, act_dim),
+        (cfg.n_episodes, T, cfg.frameskip, act_dim),
         dtype=np.float32,
     )
-    planner_costs = np.zeros((cfg.n_episodes, T), dtype=np.float32)
+    # NaN placeholder: distinguishes "no signal" from "actually zero".
+    planner_costs = np.full((cfg.n_episodes, T), np.nan, dtype=np.float32)
+    _cost_available = hasattr(policy, "solver") and hasattr(
+        policy.solver, "last_cost"
+    )
+    if not _cost_available:
+        warnings.warn(
+            "planner_costs will be NaN — swm solver does not expose last_cost",
+            stacklevel=2,
+        )
 
     # Record state 0 from env infos
     initial_info = world.infos
@@ -147,32 +170,53 @@ def evaluate_replay(
 
     # --- run planner loop ---
     world.set_policy(policy)
-    # Wrap get_action to capture the last action emitted by the planner.
-    last_action_box = {"val": None}
+    # Wrap get_action to accumulate every per-inner-step action emitted by
+    # the planner within a given world.step().
+    action_buffer: list[np.ndarray] = []
     _orig_get_action = policy.get_action
 
     def _capture_get_action(info):
         a = _orig_get_action(info)
-        last_action_box["val"] = np.asarray(a)
+        action_buffer.append(np.asarray(a))
         return a
 
-    policy.get_action = _capture_get_action  # type: ignore[assignment]
+    _warned_block_mismatch = False
+    try:
+        policy.get_action = _capture_get_action  # type: ignore[assignment]
 
-    for t in range(T):
-        # Inject goal into infos so WorldModelPolicy's get_action sees it.
-        world.infos["goal"] = goal_broadcast
-        # At each step, world.step() triggers policy.get_action(info) → solver.plan → env.step
-        world.step()  # advances env by action_block env steps
-        info = world.infos
-        planner_states[:, t + 1, :] = _extract_state(info, cfg.n_episodes, state_dim)
-        # Capture action from wrapper. Shape may be (n_envs, action_block, act_dim)
-        # or (n_envs, act_dim*action_block); flatten to match log layout.
-        la = last_action_box["val"]
-        if la is not None:
-            planner_actions[:, t, :] = la.reshape(cfg.n_episodes, -1)
-        # planner_costs: solver usually does not expose last_cost; leave zeros.
-        if hasattr(policy, "solver") and hasattr(policy.solver, "last_cost"):
-            planner_costs[:, t] = np.asarray(policy.solver.last_cost)
+        for t in range(T):
+            # Inject goal into infos so WorldModelPolicy's get_action sees it.
+            world.infos["goal"] = goal_broadcast
+            action_buffer.clear()
+            # world.step() triggers policy.get_action `action_block` times
+            world.step()
+            info = world.infos
+            planner_states[:, t + 1, :] = _extract_state(
+                info, cfg.n_episodes, state_dim
+            )
+            # Stack captured actions. Each buffered action has shape
+            # (n_envs, act_dim); buffer length should equal cfg.frameskip.
+            if len(action_buffer) == cfg.frameskip:
+                arr = np.stack(action_buffer, axis=0)  # (block, n_envs, act_dim)
+                arr = arr.reshape(cfg.frameskip, cfg.n_episodes, act_dim)
+                planner_actions[:, t, :, :] = np.transpose(arr, (1, 0, 2))
+            elif len(action_buffer) > 0:
+                if not _warned_block_mismatch:
+                    warnings.warn(
+                        f"action_buffer has {len(action_buffer)} entries, "
+                        f"expected {cfg.frameskip}; broadcasting last action "
+                        f"across block dim",
+                        stacklevel=2,
+                    )
+                    _warned_block_mismatch = True
+                last = np.asarray(action_buffer[-1]).reshape(
+                    cfg.n_episodes, act_dim
+                )
+                planner_actions[:, t, :, :] = last[:, None, :]
+            if _cost_available:
+                planner_costs[:, t] = np.asarray(policy.solver.last_cost)
+    finally:
+        policy.get_action = _orig_get_action  # type: ignore[assignment]
 
     # --- compute final distances + success flags ---
     # z_planner at final step: re-encode final observation
