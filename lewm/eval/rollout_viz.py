@@ -9,9 +9,12 @@ PIL for frame rendering, imageio.v3 for MP4 encoding (libx264).
 """
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
+import imageio.v3 as iio
 import numpy as np
+from PIL import Image, ImageDraw, ImageFont
 
 # Kinematic dimension names for the first 8 state dims.
 KINEMATIC_DIM_NAMES = [
@@ -83,11 +86,9 @@ def _get_font(size=14):
         "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
     ]:
         try:
-            from PIL import ImageFont
             return ImageFont.truetype(font_path, size)
         except (OSError, IOError):
             continue
-    from PIL import ImageFont
     return ImageFont.load_default()
 
 
@@ -135,10 +136,6 @@ def render_trajectory_video(
         dim_names: Names for state dimensions (for side panel). Defaults
             to KINEMATIC_DIM_NAMES.
     """
-    from PIL import Image, ImageDraw
-    import imageio.v3 as iio
-    import math
-
     predicted = rollout["predicted_states"]
     actual = rollout["actual_states"]
     rgb_frames = rollout.get("rgb_frames")  # (T, H, W, 3) uint8 or None
@@ -357,9 +354,6 @@ def render_planner_trajectory_video(
           * last action as bars
           * cost so far as mini line plot
     """
-    import imageio.v3 as iio
-    from PIL import Image, ImageDraw
-
     T_plus_1 = len(planner_states)
     frames = []
     cost_history = []
@@ -401,7 +395,6 @@ def _draw_world_panel(
     planner_state, dataset_state, goal_state, size,
     planner_trail, dataset_trail,
 ):
-    from PIL import Image, ImageDraw
     img = Image.new("RGB", (size, size), (230, 230, 240))
     draw = ImageDraw.Draw(img)
 
@@ -431,7 +424,6 @@ def _draw_world_panel(
     draw_trail(dataset_trail, (60, 120, 220))
 
     def draw_triangle(state, color, r=12):
-        import math
         x, y, _, _, angle = state[0], state[1], state[2], state[3], state[4]
         cx, cy = to_px(float(x), float(y))
         pts = []
@@ -443,7 +435,6 @@ def _draw_world_panel(
     draw_triangle(dataset_state, (60, 120, 220))
     draw_triangle(planner_state, (220, 60, 60))
 
-    import math
     gx, gy = to_px(float(goal_state[0]), float(goal_state[1]))
     r = 14
     star_pts = []
@@ -463,7 +454,6 @@ def _draw_world_panel(
 
 def _draw_info_panel(t, T, planner_state, dataset_state, goal_state,
                      last_action, cost_history, size):
-    from PIL import Image, ImageDraw
     W, H = size
     img = Image.new("RGB", (W, H), (250, 250, 250))
     draw = ImageDraw.Draw(img)
