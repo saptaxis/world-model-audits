@@ -15,20 +15,23 @@ class LunarLanderSynthetic(gym.Env):
     The physics is unchanged — we just replace the default RGB render with
     a triangle-on-black frame matching what the JEPA was trained on.
 
-    Observation is a dict: {"pixels": (224, 224, 3) uint8}.
-    Info dict contains "state": the raw 6-dim kinematic state (x, y, vx, vy,
-    angle, ang_vel) so downstream evaluation can report kinematic success.
+    Observation is a dict: {"state": (6,) float32} (matches swm envs like pusht
+    which return `{"proprio"/"state": ...}` without pixels). The wrapper chain
+    (MegaWrapper → AddPixelsWrapper) calls our `render()` to produce the
+    pixels that get added to info separately.
     """
 
     metadata = {"render_modes": ["rgb_array"], "render_fps": 50}
+
+    STATE_DIM = 15  # 6 kinematic + 2 leg contacts + 7 physics params, matches dataset
 
     def __init__(self, img_size: int = 224, triangle_radius: int = 35,
                  render_mode: str | None = "rgb_array"):
         self._inner = gym.make("ParametricLunarLander-v0")
         self.action_space = self._inner.action_space  # Box(-1, 1, (2,))
         self.observation_space = spaces.Dict({
-            "pixels": spaces.Box(
-                low=0, high=255, shape=(img_size, img_size, 3), dtype=np.uint8
+            "state": spaces.Box(
+                low=-np.inf, high=np.inf, shape=(self.STATE_DIM,), dtype=np.float32
             ),
         })
         self.img_size = img_size
@@ -37,33 +40,48 @@ class LunarLanderSynthetic(gym.Env):
         self._last_raw_state: np.ndarray | None = None
         self._goal_state = None
 
-    def _render_obs(self, raw_obs: np.ndarray) -> dict:
-        """Convert raw 8-dim LL obs to pixels dict."""
-        x, y, _vx, _vy, angle = raw_obs[0], raw_obs[1], raw_obs[2], raw_obs[3], raw_obs[4]
-        frame = render_synthetic_frame(
-            x=float(x), y=float(y), angle=float(angle),
-            size=self.img_size, triangle_radius=self.triangle_radius,
-        )
-        return {"pixels": frame}
+    def _state_obs(self, raw_obs: np.ndarray) -> dict:
+        """Return 15-dim state: 6 kinematic + 2 leg contacts + 7 physics params.
+
+        ParametricLunarLander's 8-dim obs (kinematic+legs) is extended with the
+        7 physics params to match the dataset's 15-dim state column, which is
+        required by the scaler fitted from dataset stats.
+        """
+        raw8 = raw_obs[:8].astype(np.float32)  # kinematic + legs
+        physics7 = np.array(self._get_physics_params(), dtype=np.float32)
+        return {"state": np.concatenate([raw8, physics7])}
+
+    def _get_physics_params(self) -> list[float]:
+        """Read physics params from the inner env (matches dataset convention)."""
+        inner = self._inner.unwrapped
+        return [
+            float(inner.gravity) if hasattr(inner, "gravity") else -10.0,
+            float(inner.main_engine_power) if hasattr(inner, "main_engine_power") else 13.0,
+            float(inner.side_engine_power) if hasattr(inner, "side_engine_power") else 0.6,
+            float(getattr(inner, "lander_density", 5.0)),
+            float(getattr(inner, "enable_wind", 0)),
+            float(getattr(inner, "wind_power", 15.0)),
+            float(getattr(inner, "turbulence_power", 1.5)),
+        ]
 
     def reset(self, *, seed=None, options=None):
         raw_obs, info = self._inner.reset(seed=seed, options=options)
         self._last_raw_state = raw_obs
-        info = dict(info)
-        info["state"] = raw_obs[:6].astype(np.float32).copy()
-        return self._render_obs(raw_obs), info
+        return self._state_obs(raw_obs), dict(info)
 
     def step(self, action):
         raw_obs, reward, terminated, truncated, info = self._inner.step(action)
         self._last_raw_state = raw_obs
-        info = dict(info)
-        info["state"] = raw_obs[:6].astype(np.float32).copy()
-        return self._render_obs(raw_obs), float(reward), bool(terminated), bool(truncated), info
+        return self._state_obs(raw_obs), float(reward), bool(terminated), bool(truncated), dict(info)
 
     def render(self):
         if self._last_raw_state is None:
             raise RuntimeError("render() called before reset()")
-        return self._render_obs(self._last_raw_state)["pixels"]
+        raw = self._last_raw_state
+        return render_synthetic_frame(
+            x=float(raw[0]), y=float(raw[1]), angle=float(raw[4]),
+            size=self.img_size, triangle_radius=self.triangle_radius,
+        )
 
     def close(self):
         self._inner.close()

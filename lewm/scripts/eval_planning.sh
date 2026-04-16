@@ -33,9 +33,12 @@ shift $(( $# < 4 ? $# : 4 ))
 
 export STABLEWM_HOME=/media/hdd1/physics-priors-latent-space/lunar-lander-data
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
-export PYTHONPATH=/workspace/world-model-audits:${PYTHONPATH:-}
 
-cd /workspace/world-model-audits/lewm/vendor/le-wm
+# Resolve repo root dynamically so the script works both in scad and on host.
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+export PYTHONPATH=${REPO_ROOT}:${PYTHONPATH:-}
+
+cd "${REPO_ROOT}/lewm/vendor/le-wm"
 
 CONFIG_NAME="lunarlander_${MODE}"
 

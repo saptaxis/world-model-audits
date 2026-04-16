@@ -14,21 +14,16 @@ def test_env_registered():
 
 
 def test_env_observation_shape():
-    """Env returns 224x224x3 uint8 pixels matching training data format."""
+    """Env returns a state-dict obs; pixels are produced by render()."""
     env = gym.make("LunarLanderSynthetic-v0")
     obs, info = env.reset(seed=42)
-    assert "pixels" in obs, f"Expected 'pixels' in obs dict, got {obs.keys()}"
-    assert obs["pixels"].shape == (224, 224, 3)
-    assert obs["pixels"].dtype == np.uint8
-    env.close()
-
-
-def test_env_state_in_info():
-    """Info dict exposes 6-dim kinematic state for evaluation metrics."""
-    env = gym.make("LunarLanderSynthetic-v0")
-    obs, info = env.reset(seed=42)
-    assert "state" in info, f"Expected 'state' in info, got {info.keys()}"
-    assert info["state"].shape == (6,)
+    assert "state" in obs, f"Expected 'state' in obs dict, got {obs.keys()}"
+    assert obs["state"].shape == (6,)
+    assert obs["state"].dtype == np.float32
+    # Pixels come via render()
+    frame = env.render()
+    assert frame.shape == (224, 224, 3)
+    assert frame.dtype == np.uint8
     env.close()
 
 
@@ -46,20 +41,20 @@ def test_env_step():
     env = gym.make("LunarLanderSynthetic-v0")
     env.reset(seed=42)
     obs, reward, terminated, truncated, info = env.step(np.array([0.0, 0.0]))
-    assert obs["pixels"].shape == (224, 224, 3)
+    assert obs["state"].shape == (6,)
     assert isinstance(reward, float)
     assert isinstance(terminated, bool)
     env.close()
 
 
 def test_wrapper_render_matches_direct_render():
-    """Frames from LunarLanderSynthetic-v0 must match render_synthetic_frame exactly."""
+    """Frames from env.render() must match render_synthetic_frame exactly."""
     from lewm.utils.synthetic_render import render_synthetic_frame
 
     env = gym.make("LunarLanderSynthetic-v0")
     obs, info = env.reset(seed=42)
 
-    state = info["state"]
+    state = obs["state"]
     direct_frame = render_synthetic_frame(
         x=float(state[0]),
         y=float(state[1]),
@@ -67,7 +62,7 @@ def test_wrapper_render_matches_direct_render():
         size=224,
         triangle_radius=35,
     )
-    np.testing.assert_array_equal(obs["pixels"], direct_frame)
+    np.testing.assert_array_equal(env.render(), direct_frame)
     env.close()
 
 
@@ -77,9 +72,10 @@ def test_set_state_via_replay():
     ref_env = gym.make("LunarLanderSynthetic-v0")
     ref_env.reset(seed=42)
     prefix_actions = np.array([[0.0, 0.0]] * 5, dtype=np.float32)
+    ref_obs = None
     for a in prefix_actions:
-        _, _, _, _, ref_info = ref_env.step(a)
-    target_state = ref_info["state"].copy()
+        ref_obs, _, _, _, _ = ref_env.step(a)
+    target_state = ref_obs["state"].copy()
     ref_env.close()
 
     # Now use _set_state with same prefix + seed
