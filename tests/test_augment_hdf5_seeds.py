@@ -5,6 +5,7 @@ from pathlib import Path
 import h5py
 import hdf5plugin  # noqa: F401 — registers plugins for HDF5 I/O
 import numpy as np
+import pytest
 
 
 def _make_fake_source_episode(tmp_path: Path, idx: int, seed: int, n_steps: int = 5):
@@ -82,3 +83,49 @@ def test_augment_slices_excess_source_episodes(tmp_path):
     with h5py.File(h5, "r") as f:
         seeds = f["ep_seed"][:]
     np.testing.assert_array_equal(seeds, np.array([0, 1, 2], dtype=np.int32))
+
+
+def test_augment_preserves_values_on_repeat(tmp_path):
+    """Running augment twice leaves ep_seed values unchanged."""
+    from lewm.scripts.augment_hdf5_seeds import augment_with_seeds
+    src_dir = tmp_path / "source"
+    src_dir.mkdir()
+    for i in range(3):
+        _make_fake_source_episode(src_dir, idx=i, seed=i * 7)
+    h5 = _make_fake_hdf5(tmp_path, n_episodes=3)
+
+    augment_with_seeds(h5_path=h5, source_dir=src_dir)
+    augment_with_seeds(h5_path=h5, source_dir=src_dir)
+
+    with h5py.File(h5, "r") as f:
+        seeds = f["ep_seed"][:]
+    np.testing.assert_array_equal(seeds, np.array([0, 7, 14], dtype=np.int32))
+
+
+def test_augment_raises_on_existing_mismatch(tmp_path):
+    """If ep_seed already exists but disagrees with computed seeds, raise."""
+    from lewm.scripts.augment_hdf5_seeds import augment_with_seeds
+    src_dir = tmp_path / "source"
+    src_dir.mkdir()
+    for i in range(3):
+        _make_fake_source_episode(src_dir, idx=i, seed=i)
+    h5 = _make_fake_hdf5(tmp_path, n_episodes=3)
+
+    with h5py.File(h5, "a") as f:
+        f.create_dataset("ep_seed", data=np.array([99, 99, 99], dtype=np.int32))
+
+    with pytest.raises(ValueError, match="ep_seed already exists"):
+        augment_with_seeds(h5_path=h5, source_dir=src_dir)
+
+
+def test_augment_raises_when_source_shorter(tmp_path):
+    """If source has FEWER episodes than HDF5, raise ValueError."""
+    from lewm.scripts.augment_hdf5_seeds import augment_with_seeds
+    src_dir = tmp_path / "source"
+    src_dir.mkdir()
+    for i in range(2):
+        _make_fake_source_episode(src_dir, idx=i, seed=i)
+    h5 = _make_fake_hdf5(tmp_path, n_episodes=5)
+
+    with pytest.raises(ValueError, match="fewer episodes"):
+        augment_with_seeds(h5_path=h5, source_dir=src_dir)
