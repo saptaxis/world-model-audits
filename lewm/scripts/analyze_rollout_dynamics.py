@@ -66,11 +66,19 @@ def analyze_episode(pred_states, actual_states, actions, ep_idx):
 
     result = {"ep_idx": ep_idx, "n_steps": T}
 
-    # 1. Pearson correlation: action vs kinematic delta
+    # 1. Pearson correlation: action vs ALL kinematic deltas
+    # Full matrix: both actions × all 6 kinematic dims (skip ang_vel — state head R²=0.58)
     for act_name, act_sig, kin_idx, kin_name in [
+        ("main", main_a, 0, "dx"),
+        ("main", main_a, 1, "dy"),
+        ("main", main_a, 2, "dvx"),
         ("main", main_a, 3, "dvy"),
+        ("main", main_a, 4, "dangle"),
+        ("side", side_a, 0, "dx"),
+        ("side", side_a, 1, "dy"),
+        ("side", side_a, 2, "dvx"),
+        ("side", side_a, 3, "dvy"),
         ("side", side_a, 4, "dangle"),
-        ("side", side_a, 5, "dang_vel"),
     ]:
         if act_sig.std() < 1e-6:
             result[f"pearson_{act_name}_{kin_name}_pred"] = float("nan")
@@ -82,9 +90,12 @@ def analyze_episode(pred_states, actual_states, actions, ep_idx):
         result[f"pearson_{act_name}_{kin_name}_gt"] = float(r_gt)
         result[f"pearson_{act_name}_{kin_name}_pred_p"] = float(p_pred)
 
-    # 2. Cross-correlation with lag
+    # 2. Cross-correlation with lag (key pairs only)
     for act_name, act_sig, kin_idx, kin_name in [
         ("main", main_a, 3, "dvy"),
+        ("main", main_a, 1, "dy"),
+        ("side", side_a, 0, "dx"),
+        ("side", side_a, 2, "dvx"),
         ("side", side_a, 4, "dangle"),
     ]:
         if act_sig.std() < 1e-6 or pred_deltas[:, kin_idx].std() < 1e-6:
@@ -146,9 +157,7 @@ def main():
 
     # Pooled analysis
     all_main, all_side = [], []
-    all_pred_dvy, all_gt_dvy = [], []
-    all_pred_da, all_gt_da = [], []
-    all_pred_dav, all_gt_dav = [], []
+    all_pred_deltas, all_gt_deltas = [], []
 
     for r in results:
         pred = r["predicted_states"]
@@ -160,43 +169,51 @@ def main():
         for t in range(T):
             all_main.append(float(actions[t][0]))
             all_side.append(float(actions[t][1]))
-            all_pred_dvy.append(pred[t + 1, 3] - pred[t, 3])
-            all_gt_dvy.append(actual[t + 1, 3] - actual[t, 3])
-            all_pred_da.append(pred[t + 1, 4] - pred[t, 4])
-            all_gt_da.append(actual[t + 1, 4] - actual[t, 4])
-            all_pred_dav.append(pred[t + 1, 5] - pred[t, 5])
-            all_gt_dav.append(actual[t + 1, 5] - actual[t, 5])
+            all_pred_deltas.append(pred[t + 1, :6] - pred[t, :6])
+            all_gt_deltas.append(actual[t + 1, :6] - actual[t, :6])
 
     all_main = np.array(all_main)
     all_side = np.array(all_side)
-    all_pred_dvy = np.array(all_pred_dvy)
-    all_gt_dvy = np.array(all_gt_dvy)
-    all_pred_da = np.array(all_pred_da)
-    all_gt_da = np.array(all_gt_da)
+    all_pred_deltas = np.array(all_pred_deltas)  # (N, 6)
+    all_gt_deltas = np.array(all_gt_deltas)
 
     pooled = {}
-    for act_name, act, pred_d, gt_d, kin_name in [
-        ("main", all_main, all_pred_dvy, all_gt_dvy, "dvy"),
-        ("side", all_side, all_pred_da, all_gt_da, "dangle"),
-        ("side", all_side, np.array(all_pred_dav), np.array(all_gt_dav), "dang_vel"),
+    for act_name, act, kin_idx, kin_name in [
+        ("main", all_main, 0, "dx"),
+        ("main", all_main, 1, "dy"),
+        ("main", all_main, 2, "dvx"),
+        ("main", all_main, 3, "dvy"),
+        ("main", all_main, 4, "dangle"),
+        ("side", all_side, 0, "dx"),
+        ("side", all_side, 1, "dy"),
+        ("side", all_side, 2, "dvx"),
+        ("side", all_side, 3, "dvy"),
+        ("side", all_side, 4, "dangle"),
     ]:
+        pred_d = all_pred_deltas[:, kin_idx]
+        gt_d = all_gt_deltas[:, kin_idx]
         r_p, p_p = pearsonr(act, pred_d)
         r_g, p_g = pearsonr(act, gt_d)
         pooled[f"{act_name}_vs_{kin_name}_pred"] = f"r={r_p:+.3f} (p={p_p:.4f})"
         pooled[f"{act_name}_vs_{kin_name}_gt"] = f"r={r_g:+.3f} (p={p_g:.4f})"
 
-    # Lagged correlation pooled
+    # Lagged correlation pooled (key pairs)
     lagged = {}
-    for lag in range(4):
-        if lag == 0:
-            m, pdv, gdv = all_main, all_pred_dvy, all_gt_dvy
-        else:
-            m = all_main[:-lag]
-            pdv = all_pred_dvy[lag:]
-            gdv = all_gt_dvy[lag:]
-        r_p, _ = pearsonr(m, pdv)
-        r_g, _ = pearsonr(m, gdv)
-        lagged[f"lag{lag}"] = f"pred r={r_p:+.3f}, GT r={r_g:+.3f}"
+    for act_name, act, kin_idx, kin_name in [
+        ("main", all_main, 3, "dvy"),
+        ("side", all_side, 0, "dx"),
+        ("side", all_side, 2, "dvx"),
+    ]:
+        for lag in range(4):
+            if lag == 0:
+                a, pd, gd = act, all_pred_deltas[:, kin_idx], all_gt_deltas[:, kin_idx]
+            else:
+                a = act[:-lag]
+                pd = all_pred_deltas[lag:, kin_idx]
+                gd = all_gt_deltas[lag:, kin_idx]
+            r_p, _ = pearsonr(a, pd)
+            r_g, _ = pearsonr(a, gd)
+            lagged[f"{act_name}_vs_{kin_name}_lag{lag}"] = f"pred r={r_p:+.3f}, GT r={r_g:+.3f}"
 
     # Print report
     out_dir = Path(args.output_dir)
@@ -208,27 +225,22 @@ def main():
 
     print(f"\nEpisodes: {len(ep_reports)}, steps per episode: ~{args.seq_len}")
 
-    # Per-episode table
-    print("\n--- Per-episode: main thrust vs Δvy ---")
-    print(f"{'ep':>4s}  {'pred_r':>8s}  {'gt_r':>8s}  {'xcorr_lag':>10s}  {'xcorr_peak':>11s}  {'traj_y':>7s}  {'traj_vy':>8s}")
+    # Per-episode table: full action-kinematic matrix
+    print("\n--- Per-episode: action vs kinematic delta correlations (pred) ---")
+    header_pairs = [
+        ("main_dvy", "m→Δvy"), ("main_dy", "m→Δy"),
+        ("side_dx", "s→Δx"), ("side_dvx", "s→Δvx"), ("side_dangle", "s→Δa"),
+    ]
+    print(f"{'ep':>4s}", end="")
+    for _, label in header_pairs:
+        print(f"  {label:>8s}", end="")
+    print(f"  {'traj_y':>7s}  {'traj_vy':>8s}  {'traj_x':>7s}  {'traj_a':>7s}")
     for r in ep_reports:
-        pr = r.get("pearson_main_dvy_pred", float("nan"))
-        gr = r.get("pearson_main_dvy_gt", float("nan"))
-        xl = r.get("xcorr_main_dvy_pred_peak_lag", float("nan"))
-        xr = r.get("xcorr_main_dvy_pred_peak_r", float("nan"))
-        ty = r.get("traj_corr_y", float("nan"))
-        tv = r.get("traj_corr_vy", float("nan"))
-        print(f"{r['ep_idx']:>4d}  {pr:>+8.3f}  {gr:>+8.3f}  {xl:>10}  {xr:>+11.3f}  {ty:>+7.3f}  {tv:>+8.3f}")
-
-    print("\n--- Per-episode: side thrust vs Δangle ---")
-    print(f"{'ep':>4s}  {'pred_r':>8s}  {'gt_r':>8s}  {'xcorr_lag':>10s}  {'xcorr_peak':>11s}  {'traj_angle':>10s}")
-    for r in ep_reports:
-        pr = r.get("pearson_side_dangle_pred", float("nan"))
-        gr = r.get("pearson_side_dangle_gt", float("nan"))
-        xl = r.get("xcorr_side_dangle_pred_peak_lag", float("nan"))
-        xr = r.get("xcorr_side_dangle_pred_peak_r", float("nan"))
-        ta = r.get("traj_corr_angle", float("nan"))
-        print(f"{r['ep_idx']:>4d}  {pr:>+8.3f}  {gr:>+8.3f}  {xl:>10}  {xr:>+11.3f}  {ta:>+10.3f}")
+        print(f"{r['ep_idx']:>4d}", end="")
+        for key, _ in header_pairs:
+            v = r.get(f"pearson_{key}_pred", float("nan"))
+            print(f"  {v:>+8.3f}", end="")
+        print(f"  {r.get('traj_corr_y', float('nan')):>+7.3f}  {r.get('traj_corr_vy', float('nan')):>+8.3f}  {r.get('traj_corr_x', float('nan')):>+7.3f}  {r.get('traj_corr_angle', float('nan')):>+7.3f}")
 
     print("\n--- Pooled correlations ---")
     for k, v in pooled.items():
