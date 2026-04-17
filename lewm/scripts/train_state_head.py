@@ -89,23 +89,36 @@ def encode_predicted(
         ep_offset = f["ep_offset"][:]
         n_episodes = len(ep_len)
 
-        # Build transitions: need HS frames + 1 next at frameskip
-        transitions = []
+        # Count valid transitions and select episodes
+        valid_eps = []
+        total_trans = 0
         for ep in range(n_episodes):
             raw_len = int(ep_len[ep])
             n_output = raw_len // fs
-            if n_output < HS + 1:
-                continue
-            base = int(ep_offset[ep])
-            for t in range(HS - 1, n_output - 1):
-                transitions.append((base, t))
+            n_trans_ep = max(0, n_output - HS)  # transitions per episode
+            if n_trans_ep > 0:
+                valid_eps.append((ep, n_trans_ep))
+                total_trans += n_trans_ep
 
         rng = np.random.default_rng(seed)
-        rng.shuffle(transitions)
+        rng.shuffle(valid_eps)
+
+        # Select episodes until we have enough transitions
         if max_frames > 0:
-            transitions = transitions[:max_frames]
-        n_trans = len(transitions)
-        print(f"  {n_trans} transitions to predict")
+            selected_eps = []
+            count = 0
+            for ep, n_t in valid_eps:
+                selected_eps.append((ep, n_t))
+                count += n_t
+                if count >= max_frames:
+                    break
+            n_trans = min(count, max_frames)
+        else:
+            selected_eps = valid_eps
+            n_trans = total_trans
+        # Sort by episode offset for contiguous HDF5 reads
+        selected_eps.sort(key=lambda x: int(ep_offset[x[0]]))
+        print(f"  {n_trans} transitions from {len(selected_eps)} episodes")
 
         state_dim = f["state"].shape[1]
         # Get z_dim from test forward
@@ -115,67 +128,75 @@ def encode_predicted(
             test_out = model.encoder(test_pix.to(device_t), interpolate_pos_encoding=True)
             z_dim = model.projector(test_out.last_hidden_state[:, 0]).shape[1]
 
-        all_z = np.zeros((n_trans, z_dim), dtype=np.float32)
-        all_state = np.zeros((n_trans, state_dim), dtype=np.float32)
+        all_z_parts = []
+        all_state_parts = []
 
         pbar = tqdm(total=n_trans, desc="predicting z", unit="trans")
 
-        for b_start in range(0, n_trans, batch_size):
-            b_end = min(b_start + batch_size, n_trans)
-            batch = transitions[b_start:b_end]
-            B = len(batch)
+        for ep_idx, n_trans_ep in selected_eps:
+            base = int(ep_offset[ep_idx])
+            raw_len = int(ep_len[ep_idx])
+            n_output = raw_len // fs
 
-            # Gather indices
-            hist_raw = np.array([[base + (t - (HS - 1) + h) * fs for h in range(HS)]
-                                 for base, t in batch])  # (B, HS)
-            act_raw = np.array([base + t * fs for base, t in batch])  # (B,)
-            next_state_raw = np.array([base + (t + 1) * fs for base, t in batch])  # (B,)
+            # Contiguous read: all output-step frames for this episode
+            # Need frames at indices: base, base+fs, base+2*fs, ..., base+(n_output-1)*fs
+            frame_indices = np.arange(n_output) * fs + base
+            ep_pixels = f["pixels"][frame_indices[0]:frame_indices[-1]+1:fs]  # contiguous slice
+            ep_states = f["state"][frame_indices[0]:frame_indices[-1]+1:fs]
+            ep_actions = f["action"][base:base+raw_len]  # all raw actions for episode
 
-            # Read pixels for history — deduplicate + sort for HDF5 compliance
-            flat_hist = hist_raw.flatten()
-            unique_idx, inverse = np.unique(flat_hist, return_inverse=True)
-            pixels_unique = f["pixels"][unique_idx]  # sorted, no dupes
-            pixels_flat = pixels_unique[inverse]     # map back to original order
-            pixels_hist = pixels_flat.reshape(B, HS, *pixels_flat.shape[1:])
+            # For each valid transition t (where t >= HS-1 and t+1 < n_output):
+            # history frames: t-2, t-1, t; next state at t+1
+            for t_start in range(0, n_trans_ep, batch_size):
+                t_end = min(t_start + batch_size, n_trans_ep)
+                B = t_end - t_start
+                t_indices = np.arange(t_start, t_end) + (HS - 1)  # offset by history
 
-            # Read actions (fs raw actions per transition, concatenated)
-            actions_batch = np.zeros((B, fs * 2), dtype=np.float32)
-            for i, aidx in enumerate(act_raw):
-                end = min(int(aidx) + fs, f["action"].shape[0])
-                raw = f["action"][int(aidx):end]
-                if len(raw) < fs:
-                    raw = np.concatenate([raw, np.zeros((fs - len(raw), 2), dtype=np.float32)])
-                actions_batch[i] = raw.flatten()
+                # History pixels: (B, HS, H, W, 3)
+                pixels_hist = np.stack([
+                    ep_pixels[t_indices - (HS - 1) + h] for h in range(HS)
+                ], axis=1)
 
-            # Read next states — deduplicate for HDF5
-            unique_ns, inverse_ns = np.unique(next_state_raw, return_inverse=True)
-            states_unique = f["state"][unique_ns]
-            states_next = states_unique[inverse_ns]
+                # Actions: for each transition, concatenate fs raw actions starting at t*fs
+                actions_batch = np.zeros((B, fs * 2), dtype=np.float32)
+                for i, t in enumerate(t_indices):
+                    act_start = t * fs  # relative to episode start
+                    act_end = min(act_start + fs, len(ep_actions))
+                    raw = ep_actions[act_start:act_end]
+                    if len(raw) < fs:
+                        raw = np.concatenate([raw, np.zeros((fs - len(raw), 2), dtype=np.float32)])
+                    actions_batch[i] = raw.flatten()
 
-            # Encode history frames
-            z_hist_list = []
-            for h in range(HS):
-                pix = torch.from_numpy(pixels_hist[:, h]).float().permute(0, 3, 1, 2) / 255.0
-                pix = (pix - MEAN) / STD
+                # Next states at t+1
+                states_next = ep_states[t_indices + 1]
+
+                # Encode history frames
+                z_hist_list = []
+                for h in range(HS):
+                    pix = torch.from_numpy(pixels_hist[:, h]).float().permute(0, 3, 1, 2) / 255.0
+                    pix = (pix - MEAN) / STD
+                    with torch.no_grad():
+                        out = model.encoder(pix.to(device_t), interpolate_pos_encoding=True)
+                        z = model.projector(out.last_hidden_state[:, 0])
+                    z_hist_list.append(z)
+                z_history = torch.stack(z_hist_list, dim=1)  # (B, HS, D)
+
+                # Run predictor with recorded action
+                act_t = torch.from_numpy(actions_batch).float().to(device_t)
+                act_expanded = act_t.unsqueeze(1).expand(B, HS, -1)
                 with torch.no_grad():
-                    out = model.encoder(pix.to(device_t), interpolate_pos_encoding=True)
-                    z = model.projector(out.last_hidden_state[:, 0])
-                z_hist_list.append(z)
-            z_history = torch.stack(z_hist_list, dim=1)  # (B, HS, D)
+                    act_emb = model.action_encoder(act_expanded)
+                    pred = model.predict(z_history, act_emb)
+                    z_pred = pred[:, -1]
 
-            # Run predictor with recorded action
-            act_t = torch.from_numpy(actions_batch).float().to(device_t)
-            act_expanded = act_t.unsqueeze(1).expand(B, HS, -1)
-            with torch.no_grad():
-                act_emb = model.action_encoder(act_expanded)
-                pred = model.predict(z_history, act_emb)
-                z_pred = pred[:, -1]
-
-            all_z[b_start:b_end] = z_pred.cpu().numpy()
-            all_state[b_start:b_end] = states_next
-            pbar.update(B)
+                all_z_parts.append(z_pred.cpu().numpy())
+                all_state_parts.append(states_next)
+                pbar.update(B)
 
         pbar.close()
+
+        all_z = np.concatenate(all_z_parts, axis=0)[:n_trans]
+        all_state = np.concatenate(all_state_parts, axis=0)[:n_trans]
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     np.savez(output_path, z=all_z, state=all_state)
