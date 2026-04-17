@@ -143,6 +143,12 @@ def evaluate_replay(
     # Use world.reset (not world.envs.reset) so world.infos/states are populated.
     world.reset(seed=ep_seeds_selected.tolist())
 
+    # Enable autoreset so terminated envs reset automatically on next step.
+    # Without this, SyncVectorEnv asserts on stepping a terminated env.
+    # Terminated envs' post-reset data is ignored (masked by done_at).
+    import gymnasium as gym
+    world.envs.unwrapped.autoreset_mode = gym.vector.AutoresetMode.NEXT_STEP
+
     # --- encode goal frames once (batched) ---
     goal_pixels_t = torch.from_numpy(dataset_goal_pixels).float().to(device)
     goal_pixels_t = goal_pixels_t.permute(0, 3, 1, 2) / 255.0
@@ -205,7 +211,11 @@ def evaluate_replay(
     try:
         policy.get_action = _capture_get_action  # type: ignore[assignment]
 
-        actual_steps = T
+        # Per-env tracking: done_at[i] = output step at which env i terminated.
+        # T means it ran the full budget without terminating.
+        done_at = np.full(cfg.n_episodes, T, dtype=np.int32)
+        all_done = np.zeros(cfg.n_episodes, dtype=bool)
+
         for t in range(T):
             # Inject goal into infos so WorldModelPolicy's get_action sees it.
             world.infos["goal"] = goal_broadcast
@@ -213,21 +223,25 @@ def evaluate_replay(
             # world.step() triggers policy.get_action `action_block` times
             world.step()
 
-            # Check for early termination (lander crashed/landed).
-            # Vectorized env with autoreset=DISABLED can't step past termination.
-            any_done = (
-                np.any(world.terminateds) if world.terminateds is not None else False
-            ) or (
-                np.any(world.truncateds) if world.truncateds is not None else False
-            )
-
             info = world.infos
-            planner_states[:, t + 1, :] = _extract_state(
-                info, cfg.n_episodes, state_dim
-            )
+            new_states = _extract_state(info, cfg.n_episodes, state_dim)
 
-            if any_done:
-                actual_steps = t + 1
+            # Check per-env termination. Record final state for newly-done envs.
+            termed = np.asarray(world.terminateds) if world.terminateds is not None else np.zeros(cfg.n_episodes, dtype=bool)
+            trunc = np.asarray(world.truncateds) if world.truncateds is not None else np.zeros(cfg.n_episodes, dtype=bool)
+            newly_done = (termed | trunc) & ~all_done
+
+            # For still-active envs, log their state. For newly-done envs,
+            # log their LAST valid state (before autoreset replaced it).
+            # With NEXT_STEP autoreset, the observation at this step is
+            # still the terminal observation — autoreset happens on next step().
+            planner_states[:, t + 1, :] = new_states
+
+            if np.any(newly_done):
+                done_at[newly_done] = t + 1
+                all_done |= newly_done
+
+            if np.all(all_done):
                 break
             # Stack captured actions. Each buffered action has shape
             # (n_envs, act_dim); buffer length should equal cfg.frameskip.
@@ -267,7 +281,10 @@ def evaluate_replay(
 
     final_z_distance = torch.norm(z_final - z_goals, dim=-1).cpu().numpy()
 
-    planner_final_state = planner_states[:, actual_steps, :6]
+    # Per-env final state at each env's actual termination step
+    planner_final_state = np.array([
+        planner_states[i, done_at[i], :6] for i in range(cfg.n_episodes)
+    ])
     dataset_goal_kin = dataset_goal_states[:, :6]
     kin_diff = (planner_final_state - dataset_goal_kin) * cfg.kin_weights[None, :]
     final_kin_distance = np.linalg.norm(kin_diff, axis=-1).astype(np.float32)
@@ -277,7 +294,7 @@ def evaluate_replay(
 
     return {
         "ep_seeds": ep_seeds_selected,
-        "actual_steps": np.int32(actual_steps),
+        "done_at": done_at,  # (n_episodes,) int32 — per-env termination step
         "planner_states": planner_states,
         "planner_actions": planner_actions,
         "planner_costs": planner_costs,

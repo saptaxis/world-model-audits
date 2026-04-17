@@ -33,15 +33,16 @@ def main():
     outdir.mkdir(parents=True, exist_ok=True)
 
     n = min(args.n_videos, d["planner_states"].shape[0])
-    # actual_steps: how many output steps ran before early termination
-    actual_steps = int(d["actual_steps"]) if "actual_steps" in d else d["planner_states"].shape[1] - 1
+    # Per-episode termination step
+    done_at = d["done_at"] if "done_at" in d else np.full(n, d["planner_states"].shape[1] - 1, dtype=np.int32)
     for i in range(n):
+        ep_steps = int(done_at[i]) if np.ndim(done_at) > 0 else int(done_at)
         render_planner_trajectory_video(
-            planner_states=d["planner_states"][i, :actual_steps + 1],
-            dataset_states=d["dataset_states"][i, :actual_steps + 1],
+            planner_states=d["planner_states"][i, :ep_steps + 1],
+            dataset_states=d["dataset_states"][i, :ep_steps + 1],
             goal_state=d["dataset_goal_states"][i],
-            planner_actions=d["planner_actions"][i, :actual_steps],
-            planner_costs=d["planner_costs"][i, :actual_steps],
+            planner_actions=d["planner_actions"][i, :ep_steps],
+            planner_costs=d["planner_costs"][i, :ep_steps],
             output_path=outdir / f"rollout_{i:02d}.mp4",
             title=f"Replay episode {i} (seed={int(d['ep_seeds'][i])})",
             fps=args.fps,
