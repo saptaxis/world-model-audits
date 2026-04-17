@@ -64,11 +64,19 @@ class LeWMKinematic(LeWM):
         state_pred = self.state_head(z_flat)  # ((B*S), 6)
         state_pred = rearrange(state_pred, "(b s) k -> b s k", b=B, s=S)
 
-        target = self.target_state.view(1, 1, -1)
-        weights = self.kinematic_weights.view(1, 1, -1)
+        # target_state can be (K,) for single target or (B, K) for per-env targets
+        if self.target_state.ndim == 1:
+            target = self.target_state.view(1, 1, -1)       # (1, 1, K)
+        else:
+            target = self.target_state.unsqueeze(1)          # (B, 1, K)
+        weights = self.kinematic_weights.view(1, 1, -1)      # (1, 1, K)
         diff2 = (state_pred - target) ** 2
         cost = (diff2 * weights).sum(dim=-1)  # (B, S)
         return cost
+
+    def set_target(self, target_state: torch.Tensor):
+        """Update target state (supports batched (B, K) for per-env goals)."""
+        self.target_state = target_state.to(self.kinematic_weights.device)
 
     def get_cost(self, info_dict: dict, action_candidates: torch.Tensor):
         """Override: kinematic cost instead of image-goal cost."""
