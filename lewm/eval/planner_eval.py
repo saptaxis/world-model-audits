@@ -159,6 +159,15 @@ def evaluate_replay(
         enc = model.encoder(goal_pixels_t, interpolate_pos_encoding=True)
         z_goals = model.projector(enc.last_hidden_state[:, 0])  # (n_episodes, D)
 
+    # If model uses kinematic cost (LeWMKinematic), decode goal z → kinematic
+    # targets and set per-env. This makes the cost function operate on decoded
+    # (x, y, vx, vy, angle, ang_vel) with explicit weights instead of raw
+    # z-distance, which can be dominated by non-position features.
+    if hasattr(model, "set_target") and hasattr(model, "state_head"):
+        with torch.no_grad():
+            goal_kinematics = model.state_head(z_goals)  # (n_episodes, 6)
+        model.set_target(goal_kinematics)
+
     # --- allocate per-step logs ---
     planner_states = np.zeros(
         (cfg.n_episodes, T + 1, state_dim), dtype=np.float32
