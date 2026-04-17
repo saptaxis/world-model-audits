@@ -131,11 +131,11 @@ def encode_predicted(
             act_raw = np.array([base + t * fs for base, t in batch])  # (B,)
             next_state_raw = np.array([base + (t + 1) * fs for base, t in batch])  # (B,)
 
-            # Read pixels for history — contiguous-ish reads
+            # Read pixels for history — deduplicate + sort for HDF5 compliance
             flat_hist = hist_raw.flatten()
-            so = np.argsort(flat_hist)
-            pixels_flat = f["pixels"][flat_hist[so]]
-            pixels_flat = pixels_flat[np.argsort(so)]
+            unique_idx, inverse = np.unique(flat_hist, return_inverse=True)
+            pixels_unique = f["pixels"][unique_idx]  # sorted, no dupes
+            pixels_flat = pixels_unique[inverse]     # map back to original order
             pixels_hist = pixels_flat.reshape(B, HS, *pixels_flat.shape[1:])
 
             # Read actions (fs raw actions per transition, concatenated)
@@ -147,10 +147,10 @@ def encode_predicted(
                     raw = np.concatenate([raw, np.zeros((fs - len(raw), 2), dtype=np.float32)])
                 actions_batch[i] = raw.flatten()
 
-            # Read next states
-            so_ns = np.argsort(next_state_raw)
-            states_next = f["state"][next_state_raw[so_ns]]
-            states_next = states_next[np.argsort(so_ns)]
+            # Read next states — deduplicate for HDF5
+            unique_ns, inverse_ns = np.unique(next_state_raw, return_inverse=True)
+            states_unique = f["state"][unique_ns]
+            states_next = states_unique[inverse_ns]
 
             # Encode history frames
             z_hist_list = []
