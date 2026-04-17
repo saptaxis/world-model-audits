@@ -272,6 +272,92 @@ def main():
     print()
     print(f"\n(GT is average delta across all sampled transitions, not action-specific)")
 
+    # ============================================================
+    # SUSTAINED + DELAYED ACTION TEST
+    # ============================================================
+    print("\n\n" + "=" * 70)
+    print("SUSTAINED & DELAYED ACTION TEST (5-step rollout)")
+    print("=" * 70)
+    print("\nRolling out 5 steps with constant action. If the predictor has a")
+    print("delayed response, the effect should appear at steps 2-5 even if")
+    print("step 1 shows nothing.\n")
+
+    N_ROLLOUT = 5
+
+    def rollout_n_steps(model, z_hist, action_2d, n_steps, frameskip, device, state_head):
+        """Autoregressive rollout: predict n_steps ahead with constant action."""
+        z_h = z_hist.clone()  # (N, HS, D)
+        HS = z_h.shape[1]
+        decoded_per_step = []
+        for step in range(n_steps):
+            z_next = predict_one_step(model, z_h, action_2d, frameskip, device)
+            with torch.no_grad():
+                kin = state_head(z_next).cpu().numpy()
+            decoded_per_step.append(kin)
+            # Shift history: drop oldest, append new
+            z_h = torch.cat([z_h[:, 1:, :], z_next.unsqueeze(1)], dim=1)
+        return decoded_per_step  # list of (N, 6), one per step
+
+    rollouts = {}
+    for name, act in actions.items():
+        rollouts[name] = rollout_n_steps(
+            model, z_history, act, N_ROLLOUT, args.frameskip, device, state_head
+        )
+
+    # Compare main_thrust vs no_action at each step
+    print("Main thrust vs no_action — vy direction accuracy per step:")
+    print(f"  {'step':>5s}  {'accuracy':>8s}  {'mean Δvy':>10s}")
+    for step in range(N_ROLLOUT):
+        acc = direction_accuracy(rollouts["main_thrust"][step],
+                                rollouts["no_action"][step], 3, +1)
+        md = mean_diff(rollouts["main_thrust"][step],
+                      rollouts["no_action"][step], 3)
+        print(f"  {step+1:>5d}  {acc:>8.1%}  {md:>+10.4f}")
+
+    # Compare side_right vs no_action at each step
+    print("\nSide right vs no_action — ang_vel direction accuracy per step:")
+    print(f"  {'step':>5s}  {'accuracy':>8s}  {'mean Δang_vel':>14s}")
+    for step in range(N_ROLLOUT):
+        acc = direction_accuracy(rollouts["side_right"][step],
+                                rollouts["no_action"][step], 5, +1)
+        md = mean_diff(rollouts["side_right"][step],
+                      rollouts["no_action"][step], 5)
+        print(f"  {step+1:>5d}  {acc:>8.1%}  {md:>+14.4f}")
+
+    # Delayed action test: thrust at step 0 only, then no-action for steps 1-4
+    print("\n\nDELAYED ACTION TEST: thrust at step 0 only, then no-action")
+    print("If predictor has a 1-step delay, effect appears at step 2+\n")
+
+    def rollout_impulse(model, z_hist, impulse_action, n_steps, frameskip, device, state_head):
+        """Step 0: impulse_action. Steps 1+: no_action."""
+        z_h = z_hist.clone()
+        HS = z_h.shape[1]
+        no_act = [0.0, 0.0]
+        decoded_per_step = []
+        for step in range(n_steps):
+            act = impulse_action if step == 0 else no_act
+            z_next = predict_one_step(model, z_h, act, frameskip, device)
+            with torch.no_grad():
+                kin = state_head(z_next).cpu().numpy()
+            decoded_per_step.append(kin)
+            z_h = torch.cat([z_h[:, 1:, :], z_next.unsqueeze(1)], dim=1)
+        return decoded_per_step
+
+    impulse_main = rollout_impulse(
+        model, z_history, [1.0, 0.0], N_ROLLOUT, args.frameskip, device, state_head
+    )
+    baseline_none = rollout_n_steps(
+        model, z_history, [0.0, 0.0], N_ROLLOUT, args.frameskip, device, state_head
+    )
+
+    print("Impulse main thrust (step 0 only) vs sustained no_action — vy per step:")
+    print(f"  {'step':>5s}  {'accuracy':>8s}  {'mean Δvy':>10s}  {'note':>20s}")
+    for step in range(N_ROLLOUT):
+        acc = direction_accuracy(impulse_main[step], baseline_none[step], 3, +1)
+        md = mean_diff(impulse_main[step], baseline_none[step], 3)
+        note = "← impulse step" if step == 0 else "← coasting (no action)"
+        print(f"  {step+1:>5d}  {acc:>8.1%}  {md:>+10.4f}  {note:>20s}")
+
 
 if __name__ == "__main__":
     main()
