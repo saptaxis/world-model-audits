@@ -44,6 +44,145 @@ from eval.encode_dataset import encode_dataset
 from eval.state_head import train_state_head, save_state_head, KIN_DIM_NAMES
 
 
+def encode_predicted(
+    model_path: str,
+    dataset_name: str,
+    cache_dir: str,
+    output_path: str,
+    device: str = "cuda",
+    batch_size: int = 256,
+    max_frames: int = 0,
+    seed: int = 42,
+    read_chunk_size: int = 10000,
+):
+    """Generate predicted z's from the predictor (not encoder) for state head training.
+
+    For each transition: encode 3-frame history → run predictor with recorded
+    action → produce z_{t+1}_pred. Pair with GT state_{t+1}.
+
+    Output npz has same (z, state) keys as encode_dataset for compatibility.
+    """
+    import h5py
+    import hdf5plugin  # noqa: F401
+    import torch
+    from tqdm import tqdm
+
+    LEWM_DIR = Path(__file__).resolve().parent.parent / "vendor" / "le-wm"
+    sys.path.insert(0, str(LEWM_DIR))
+    import stable_worldmodel as swm
+
+    MEAN = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
+    STD = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
+
+    device_t = torch.device(device)
+    model = torch.load(model_path, map_location=device_t, weights_only=False)
+    model.eval()
+
+    HS = 3  # history size
+    fs = 10  # frameskip (hardcoded to match training)
+
+    datasets_dir = swm.data.utils.get_cache_dir(cache_dir, sub_folder="datasets")
+    h5_path = Path(datasets_dir) / f"{dataset_name}.h5"
+
+    with h5py.File(h5_path, "r") as f:
+        ep_len = f["ep_len"][:]
+        ep_offset = f["ep_offset"][:]
+        n_episodes = len(ep_len)
+
+        # Build transitions: need HS frames + 1 next at frameskip
+        transitions = []
+        for ep in range(n_episodes):
+            raw_len = int(ep_len[ep])
+            n_output = raw_len // fs
+            if n_output < HS + 1:
+                continue
+            base = int(ep_offset[ep])
+            for t in range(HS - 1, n_output - 1):
+                transitions.append((base, t))
+
+        rng = np.random.default_rng(seed)
+        rng.shuffle(transitions)
+        if max_frames > 0:
+            transitions = transitions[:max_frames]
+        n_trans = len(transitions)
+        print(f"  {n_trans} transitions to predict")
+
+        state_dim = f["state"].shape[1]
+        # Get z_dim from test forward
+        test_pix = torch.from_numpy(f["pixels"][0:1]).float().permute(0, 3, 1, 2) / 255.0
+        test_pix = (test_pix - MEAN) / STD
+        with torch.no_grad():
+            test_out = model.encoder(test_pix.to(device_t), interpolate_pos_encoding=True)
+            z_dim = model.projector(test_out.last_hidden_state[:, 0]).shape[1]
+
+        all_z = np.zeros((n_trans, z_dim), dtype=np.float32)
+        all_state = np.zeros((n_trans, state_dim), dtype=np.float32)
+
+        pbar = tqdm(total=n_trans, desc="predicting z", unit="trans")
+
+        for b_start in range(0, n_trans, batch_size):
+            b_end = min(b_start + batch_size, n_trans)
+            batch = transitions[b_start:b_end]
+            B = len(batch)
+
+            # Gather indices
+            hist_raw = np.array([[base + (t - (HS - 1) + h) * fs for h in range(HS)]
+                                 for base, t in batch])  # (B, HS)
+            act_raw = np.array([base + t * fs for base, t in batch])  # (B,)
+            next_state_raw = np.array([base + (t + 1) * fs for base, t in batch])  # (B,)
+
+            # Read pixels for history — contiguous-ish reads
+            flat_hist = hist_raw.flatten()
+            so = np.argsort(flat_hist)
+            pixels_flat = f["pixels"][flat_hist[so]]
+            pixels_flat = pixels_flat[np.argsort(so)]
+            pixels_hist = pixels_flat.reshape(B, HS, *pixels_flat.shape[1:])
+
+            # Read actions (fs raw actions per transition, concatenated)
+            actions_batch = np.zeros((B, fs * 2), dtype=np.float32)
+            for i, aidx in enumerate(act_raw):
+                end = min(int(aidx) + fs, f["action"].shape[0])
+                raw = f["action"][int(aidx):end]
+                if len(raw) < fs:
+                    raw = np.concatenate([raw, np.zeros((fs - len(raw), 2), dtype=np.float32)])
+                actions_batch[i] = raw.flatten()
+
+            # Read next states
+            so_ns = np.argsort(next_state_raw)
+            states_next = f["state"][next_state_raw[so_ns]]
+            states_next = states_next[np.argsort(so_ns)]
+
+            # Encode history frames
+            z_hist_list = []
+            for h in range(HS):
+                pix = torch.from_numpy(pixels_hist[:, h]).float().permute(0, 3, 1, 2) / 255.0
+                pix = (pix - MEAN) / STD
+                with torch.no_grad():
+                    out = model.encoder(pix.to(device_t), interpolate_pos_encoding=True)
+                    z = model.projector(out.last_hidden_state[:, 0])
+                z_hist_list.append(z)
+            z_history = torch.stack(z_hist_list, dim=1)  # (B, HS, D)
+
+            # Run predictor with recorded action
+            act_t = torch.from_numpy(actions_batch).float().to(device_t)
+            act_expanded = act_t.unsqueeze(1).expand(B, HS, -1)
+            with torch.no_grad():
+                act_emb = model.action_encoder(act_expanded)
+                pred = model.predict(z_history, act_emb)
+                z_pred = pred[:, -1]
+
+            all_z[b_start:b_end] = z_pred.cpu().numpy()
+            all_state[b_start:b_end] = states_next
+            pbar.update(B)
+
+        pbar.close()
+
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    np.savez(output_path, z=all_z, state=all_state)
+    print(f"Saved {n_trans} predicted z's to {output_path}")
+    print(f"  z: {all_z.shape}, state: {all_state.shape}")
+
+
 def resolve_max_frames(datasets, max_frames, max_frames_per_dataset, cache_dir):
     """Return per-dataset max_frames list.
 
@@ -103,6 +242,8 @@ def main():
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--linear", action="store_true",
                         help="Use linear probe instead of MLP")
+    parser.add_argument("--predicted-z", action="store_true",
+                        help="Train on predictor z's (action-conditioned) instead of encoder z's")
     parser.add_argument("--device", default="cuda")
     args = parser.parse_args()
 
@@ -112,37 +253,72 @@ def main():
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    z_cache = output_dir / "encoded_z.npz"
 
-    # Step 1: Encode (or load cache)
-    if z_cache.exists():
-        print(f"Loading cached embeddings from {z_cache}")
-        data = np.load(z_cache)
-        z_all, state_all = data["z"], data["state"]
+    if args.predicted_z:
+        # Predicted-z mode: use predictor(z_history, action) → z_{t+1}
+        z_cache = output_dir / "predicted_z.npz"
+        if z_cache.exists():
+            print(f"Loading cached predicted embeddings from {z_cache}")
+            data = np.load(z_cache)
+            z_all, state_all = data["z"], data["state"]
+        else:
+            # For predicted-z, max_frames applies to total transitions
+            total_limit = args.max_frames if args.max_frames is not None else 0
+            if args.max_frames_per_dataset is not None:
+                total_limit = args.max_frames_per_dataset * len(datasets)
+            z_parts, state_parts = [], []
+            for ds_name in datasets:
+                ds_cache = output_dir / f"predicted_z_{ds_name}.npz"
+                ds_limit = total_limit // len(datasets) if total_limit > 0 else 0
+                print(f"\n--- Predicting z for {ds_name} (max_frames={ds_limit or 'all'}) ---")
+                encode_predicted(
+                    model_path=args.model,
+                    dataset_name=ds_name,
+                    cache_dir=args.cache_dir,
+                    output_path=str(ds_cache),
+                    device=args.device,
+                    batch_size=args.encode_batch_size,
+                    max_frames=ds_limit,
+                )
+                data = np.load(ds_cache)
+                z_parts.append(data["z"])
+                state_parts.append(data["state"])
+                print(f"  {ds_name}: {data['z'].shape[0]} transitions predicted")
+            z_all = np.concatenate(z_parts, axis=0)
+            state_all = np.concatenate(state_parts, axis=0)
+            np.savez(z_cache, z=z_all, state=state_all)
+            print(f"\nCombined: {z_all.shape[0]} predicted z's -> {z_cache}")
     else:
-        z_parts, state_parts = [], []
-        for ds_name, ds_limit in zip(datasets, per_ds_limits):
-            ds_cache = output_dir / f"encoded_z_{ds_name}.npz"
-            print(f"\n--- Encoding {ds_name} (max_frames={ds_limit or 'all'}) ---")
-            encode_dataset(
-                model_path=args.model,
-                dataset_name=ds_name,
-                cache_dir=args.cache_dir,
-                output_path=str(ds_cache),
-                device=args.device,
-                batch_size=args.encode_batch_size,
-                max_frames=ds_limit,
-                read_chunk_size=args.read_chunk_size,
-            )
-            data = np.load(ds_cache)
-            z_parts.append(data["z"])
-            state_parts.append(data["state"])
-            print(f"  {ds_name}: {data['z'].shape[0]} frames encoded")
+        # Standard encoder-z mode
+        z_cache = output_dir / "encoded_z.npz"
+        if z_cache.exists():
+            print(f"Loading cached embeddings from {z_cache}")
+            data = np.load(z_cache)
+            z_all, state_all = data["z"], data["state"]
+        else:
+            z_parts, state_parts = [], []
+            for ds_name, ds_limit in zip(datasets, per_ds_limits):
+                ds_cache = output_dir / f"encoded_z_{ds_name}.npz"
+                print(f"\n--- Encoding {ds_name} (max_frames={ds_limit or 'all'}) ---")
+                encode_dataset(
+                    model_path=args.model,
+                    dataset_name=ds_name,
+                    cache_dir=args.cache_dir,
+                    output_path=str(ds_cache),
+                    device=args.device,
+                    batch_size=args.encode_batch_size,
+                    max_frames=ds_limit,
+                    read_chunk_size=args.read_chunk_size,
+                )
+                data = np.load(ds_cache)
+                z_parts.append(data["z"])
+                state_parts.append(data["state"])
+                print(f"  {ds_name}: {data['z'].shape[0]} frames encoded")
 
-        z_all = np.concatenate(z_parts, axis=0)
-        state_all = np.concatenate(state_parts, axis=0)
-        np.savez(z_cache, z=z_all, state=state_all)
-        print(f"\nCombined: {z_all.shape[0]} frames from {len(datasets)} datasets -> {z_cache}")
+            z_all = np.concatenate(z_parts, axis=0)
+            state_all = np.concatenate(state_parts, axis=0)
+            np.savez(z_cache, z=z_all, state=state_all)
+            print(f"\nCombined: {z_all.shape[0]} frames from {len(datasets)} datasets -> {z_cache}")
 
     # Use first 6 dims only (kinematics)
     state_kin = state_all[:, :6]
