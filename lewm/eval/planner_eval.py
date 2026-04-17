@@ -88,22 +88,28 @@ def evaluate_replay(
         state_all = f["state"]  # keep as h5 handle; read slices below
         pixels_all = f["pixels"]
 
-        # Sample episodes that are long enough
-        span = (cfg.goal_offset_steps + cfg.eval_budget + 1) * cfg.frameskip
-        valid = np.where(ep_len >= span)[0]
+        # Only need enough dataset for the goal frame (goal_offset_steps ahead).
+        # The planner runs eval_budget output steps in the real env; past the
+        # episode's end there's simply no dataset reference — dataset_states
+        # gets NaN-padded beyond the episode's actual length.
+        min_span = (cfg.goal_offset_steps + 1) * cfg.frameskip
+        valid = np.where(ep_len >= min_span)[0]
         if len(valid) < cfg.n_episodes:
             raise ValueError(
-                f"Only {len(valid)} episodes long enough for span={span}; "
-                f"need {cfg.n_episodes}"
+                f"Only {len(valid)} episodes long enough to reach goal_offset "
+                f"(need {min_span} raw steps); requested {cfg.n_episodes}"
             )
         rng = np.random.default_rng(cfg.seed)
         picks = np.sort(rng.choice(valid, size=cfg.n_episodes, replace=False))
         ep_seeds_selected = ep_seed[picks].astype(np.int64)
 
-        # Build reference arrays: dataset state at steps 0..eval_budget and goal
+        # Build reference arrays: dataset state at steps 0..eval_budget (NaN-padded
+        # beyond each episode's length) and goal frame at goal_offset_steps.
         T = cfg.eval_budget
         state_dim = state_all.shape[1]
-        dataset_states = np.zeros((cfg.n_episodes, T + 1, state_dim), dtype=np.float32)
+        dataset_states = np.full(
+            (cfg.n_episodes, T + 1, state_dim), np.nan, dtype=np.float32
+        )
         dataset_goal_states = np.zeros((cfg.n_episodes, state_dim), dtype=np.float32)
         dataset_goal_pixels = np.zeros(
             (cfg.n_episodes, pixels_all.shape[1], pixels_all.shape[2], 3),
@@ -111,9 +117,14 @@ def evaluate_replay(
         )
         for i, ep_idx in enumerate(picks):
             base = int(ep_offset[ep_idx])
-            # Single fancy-indexed read: T+1 frames strided by frameskip.
-            indices = np.arange(T + 1) * cfg.frameskip + base
-            dataset_states[i] = state_all[indices]
+            raw_len = int(ep_len[ep_idx])
+            # Fill dataset_states up to the episode's actual length (in output
+            # steps). Beyond that, leave NaN so the video renderer / downstream
+            # consumers can detect missing reference.
+            max_output_steps = raw_len // cfg.frameskip
+            n_ref = min(T + 1, max_output_steps)
+            indices = np.arange(n_ref) * cfg.frameskip + base
+            dataset_states[i, :n_ref] = state_all[indices]
             goal_idx = base + cfg.goal_offset_steps * cfg.frameskip
             dataset_goal_states[i] = state_all[goal_idx]
             dataset_goal_pixels[i] = pixels_all[goal_idx]

@@ -359,13 +359,20 @@ def render_planner_trajectory_video(
     cost_history = []
 
     for t in range(T_plus_1):
+        # dataset_states may be NaN-padded beyond the episode's actual length
+        ds_valid = not np.isnan(dataset_states[t, 0])
+        ds_state = dataset_states[t] if ds_valid else None
+        # Trail: only include non-NaN entries
+        ds_trail_mask = ~np.isnan(dataset_states[:t + 1, 0])
+        ds_trail = dataset_states[:t + 1, :2][ds_trail_mask]
+
         panel_world = _draw_world_panel(
             planner_state=planner_states[t],
-            dataset_state=dataset_states[t],
+            dataset_state=ds_state,
             goal_state=goal_state,
             size=size,
             planner_trail=planner_states[:t + 1, :2],
-            dataset_trail=dataset_states[:t + 1, :2],
+            dataset_trail=ds_trail,
         )
 
         cost_history.append(
@@ -375,7 +382,7 @@ def render_planner_trajectory_video(
         panel_info = _draw_info_panel(
             t=t, T=T_plus_1 - 1,
             planner_state=planner_states[t],
-            dataset_state=dataset_states[t],
+            dataset_state=ds_state,
             goal_state=goal_state,
             last_action=planner_actions[min(t, len(planner_actions) - 1)]
                 if t < len(planner_actions) else planner_actions[-1],
@@ -432,7 +439,8 @@ def _draw_world_panel(
             pts.append((cx + r * math.cos(a), cy + r * math.sin(a)))
         draw.polygon(pts, fill=color, outline=(20, 20, 20))
 
-    draw_triangle(dataset_state, (60, 120, 220))
+    if dataset_state is not None:
+        draw_triangle(dataset_state, (60, 120, 220))
     draw_triangle(planner_state, (220, 60, 60))
 
     gx, gy = to_px(float(goal_state[0]), float(goal_state[1]))
@@ -469,8 +477,11 @@ def _draw_info_panel(t, T, planner_state, dataset_state, goal_state,
     y += 6
 
     draw.text((10, y), "Heuristic state:", fill=(0, 60, 180), font=bold); y += 18
-    for name, val in zip(["x", "y", "vx", "vy", "angle"], dataset_state[:5]):
-        draw.text((20, y), f"{name:6s} = {float(val):+.3f}", fill="black", font=font); y += 15
+    if dataset_state is not None:
+        for name, val in zip(["x", "y", "vx", "vy", "angle"], dataset_state[:5]):
+            draw.text((20, y), f"{name:6s} = {float(val):+.3f}", fill="black", font=font); y += 15
+    else:
+        draw.text((20, y), "(episode ended)", fill=(120, 120, 120), font=font); y += 15
     y += 6
 
     draw.text((10, y), "Goal:", fill=(150, 100, 0), font=bold); y += 18
@@ -479,7 +490,11 @@ def _draw_info_panel(t, T, planner_state, dataset_state, goal_state,
     y += 6
 
     draw.text((10, y), "Last action (main/side):", fill="black", font=bold); y += 18
-    for name, val in zip(["main", "side"], last_action[:2]):
+    # last_action may be (action_dim,) or (frameskip, action_dim) post-Fix2; flatten first step
+    la = np.asarray(last_action)
+    if la.ndim == 2:
+        la = la[0]  # first of frameskip block (all identical after broadcast)
+    for name, val in zip(["main", "side"], la[:2]):
         draw.text((20, y), f"{name:4s}: {_action_bar(float(val))}", fill="black", font=font); y += 15
     y += 10
 
