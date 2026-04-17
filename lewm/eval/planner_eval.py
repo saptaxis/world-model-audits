@@ -129,6 +129,16 @@ def evaluate_replay(
             dataset_goal_states[i] = state_all[goal_idx]
             dataset_goal_pixels[i] = pixels_all[goal_idx]
 
+    # --- override max_episode_steps so the env doesn't truncate before eval_budget ---
+    # eval.py sets max_episode_steps = 2 * eval_budget (treating it as raw steps).
+    # We need eval_budget * frameskip raw steps. Set generously.
+    needed_raw_steps = cfg.eval_budget * cfg.frameskip + 100
+    for env in world.envs.envs:
+        if hasattr(env, '_max_episode_steps'):
+            env._max_episode_steps = needed_raw_steps
+        if hasattr(env, 'spec') and env.spec is not None:
+            env.spec.max_episode_steps = needed_raw_steps
+
     # --- reset env with per-episode seeds (array of seeds, one per env) ---
     # Use world.reset (not world.envs.reset) so world.infos/states are populated.
     world.reset(seed=ep_seeds_selected.tolist())
@@ -195,16 +205,30 @@ def evaluate_replay(
     try:
         policy.get_action = _capture_get_action  # type: ignore[assignment]
 
+        actual_steps = T
         for t in range(T):
             # Inject goal into infos so WorldModelPolicy's get_action sees it.
             world.infos["goal"] = goal_broadcast
             action_buffer.clear()
             # world.step() triggers policy.get_action `action_block` times
             world.step()
+
+            # Check for early termination (lander crashed/landed).
+            # Vectorized env with autoreset=DISABLED can't step past termination.
+            any_done = (
+                np.any(world.terminateds) if world.terminateds is not None else False
+            ) or (
+                np.any(world.truncateds) if world.truncateds is not None else False
+            )
+
             info = world.infos
             planner_states[:, t + 1, :] = _extract_state(
                 info, cfg.n_episodes, state_dim
             )
+
+            if any_done:
+                actual_steps = t + 1
+                break
             # Stack captured actions. Each buffered action has shape
             # (n_envs, act_dim); buffer length should equal cfg.frameskip.
             if len(action_buffer) == cfg.frameskip:
@@ -243,7 +267,7 @@ def evaluate_replay(
 
     final_z_distance = torch.norm(z_final - z_goals, dim=-1).cpu().numpy()
 
-    planner_final_state = planner_states[:, -1, :6]
+    planner_final_state = planner_states[:, actual_steps, :6]
     dataset_goal_kin = dataset_goal_states[:, :6]
     kin_diff = (planner_final_state - dataset_goal_kin) * cfg.kin_weights[None, :]
     final_kin_distance = np.linalg.norm(kin_diff, axis=-1).astype(np.float32)
@@ -253,6 +277,7 @@ def evaluate_replay(
 
     return {
         "ep_seeds": ep_seeds_selected,
+        "actual_steps": np.int32(actual_steps),
         "planner_states": planner_states,
         "planner_actions": planner_actions,
         "planner_costs": planner_costs,
