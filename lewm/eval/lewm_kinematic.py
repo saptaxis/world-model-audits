@@ -49,27 +49,31 @@ class LeWMKinematic(LeWM):
         )
         return inst
 
-    def compute_kinematic_cost(self, emb_rollout: torch.Tensor) -> torch.Tensor:
+    def compute_kinematic_cost(self, emb_rollout: torch.Tensor,
+                               target: torch.Tensor | None = None) -> torch.Tensor:
         """Compute weighted kinematic MSE at the terminal step of each rollout.
 
         Args:
             emb_rollout: (B, S, T, D) predicted embedding trajectory from rollout().
+            target: (B, K) per-env target kinematics. If None, uses self.target_state.
 
         Returns:
             cost: (B, S) weighted MSE between decoded terminal state and target.
         """
-        B, S, T, D = emb_rollout.shape
+        B, S, _, _ = emb_rollout.shape
         z_terminal = emb_rollout[:, :, -1, :]  # (B, S, D)
         z_flat = rearrange(z_terminal, "b s d -> (b s) d")
-        state_pred = self.state_head(z_flat)  # ((B*S), 6)
+        state_pred = self.state_head(z_flat)  # ((B*S), K)
         state_pred = rearrange(state_pred, "(b s) k -> b s k", b=B, s=S)
 
-        # target_state can be (K,) for single target or (B, K) for per-env targets
-        if self.target_state.ndim == 1:
-            target = self.target_state.view(1, 1, -1)       # (1, 1, K)
-        else:
-            target = self.target_state.unsqueeze(1)          # (B, 1, K)
-        weights = self.kinematic_weights.view(1, 1, -1)      # (1, 1, K)
+        if target is None:
+            target = self.target_state
+        # Reshape for broadcast: (B, 1, K)
+        if target.ndim == 1:
+            target = target.view(1, 1, -1)
+        elif target.ndim == 2:
+            target = target.unsqueeze(1)
+        weights = self.kinematic_weights.view(1, 1, -1)
         diff2 = (state_pred - target) ** 2
         cost = (diff2 * weights).sum(dim=-1)  # (B, S)
         return cost
@@ -79,15 +83,28 @@ class LeWMKinematic(LeWM):
         self.target_state = target_state.to(self.kinematic_weights.device)
 
     def get_cost(self, info_dict: dict, action_candidates: torch.Tensor):
-        """Override: kinematic cost instead of image-goal cost."""
+        """Override: kinematic cost instead of image-goal cost.
+
+        If info_dict contains 'kin_target' (B, K), uses that as the per-env
+        target (sliced automatically by CEM's per-env batching). Otherwise
+        falls back to self.target_state.
+        """
         device = next(self.parameters()).device
         for k in list(info_dict.keys()):
             if torch.is_tensor(info_dict[k]):
                 info_dict[k] = info_dict[k].to(device)
 
+        # Extract per-env target from info_dict if available
+        kin_target = info_dict.pop("kin_target", None)
+        if kin_target is not None:
+            if not torch.is_tensor(kin_target):
+                kin_target = torch.as_tensor(kin_target, dtype=torch.float32, device=device)
+            else:
+                kin_target = kin_target.to(device)
+
         info_dict = self.rollout(info_dict, action_candidates)
         pred_rollout = info_dict["predicted_emb"]  # (B, S, T, D)
-        return self.compute_kinematic_cost(pred_rollout)
+        return self.compute_kinematic_cost(pred_rollout, target=kin_target)
 
 
 def build_kinematic_from_paths(
