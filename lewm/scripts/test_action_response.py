@@ -115,32 +115,39 @@ def main():
         fs = args.frameskip
         min_len = (HS + 1) * fs  # need HS frames + 1 next frame
 
-        # Sample random transitions from episodes long enough
+        # Sample random transitions from episodes long enough.
+        # Read contiguous episode slices (not fancy indexing) for speed.
         rng = np.random.default_rng(42)
         valid_eps = np.where(ep_len >= min_len)[0]
-        n = min(args.n_frames, len(valid_eps) * 5)  # cap
+        rng.shuffle(valid_eps)
+        n = args.n_frames
 
-        # For each sample: pick episode, pick start offset, read HS+1 frames
         history_pixels = []  # (N, HS, H, W, 3)
         gt_states_t = []     # (N, 6) state at t (last history frame)
         gt_states_tp1 = []   # (N, 6) state at t+1
 
-        for _ in range(n):
-            ep = rng.choice(valid_eps)
+        for ep in valid_eps:
+            if len(history_pixels) >= n:
+                break
             base = int(ep_offset[ep])
-            max_start = int(ep_len[ep]) // fs - (HS + 1)
-            if max_start <= 0:
+            raw_len = int(ep_len[ep])
+            n_output = raw_len // fs
+            if n_output < HS + 1:
                 continue
-            t_start = rng.integers(0, max_start)
 
-            # Read HS+1 frames at frameskip
-            indices = [base + (t_start + h) * fs for h in range(HS + 1)]
-            frames = pixels_all[indices]  # (HS+1, H, W, 3)
-            states = state_all[indices]   # (HS+1, state_dim)
+            # Contiguous slice: all output-step frames for this episode
+            ep_pixels = pixels_all[base:base + n_output * fs:fs]  # (n_output, H, W, 3)
+            ep_states = state_all[base:base + n_output * fs:fs]   # (n_output, state_dim)
 
-            history_pixels.append(frames[:HS])
-            gt_states_t.append(states[HS - 1, :6])
-            gt_states_tp1.append(states[HS, :6])
+            # Pick random transitions within this episode
+            n_avail = n_output - HS
+            n_pick = min(n_avail, n - len(history_pixels))
+            t_starts = rng.choice(n_avail, size=n_pick, replace=False)
+
+            for t_start in t_starts:
+                history_pixels.append(ep_pixels[t_start:t_start + HS])
+                gt_states_t.append(ep_states[t_start + HS - 1, :6])
+                gt_states_tp1.append(ep_states[t_start + HS, :6])
 
     history_pixels = np.array(history_pixels)  # (N, HS, H, W, 3)
     gt_states_t = np.array(gt_states_t)        # (N, 6)
