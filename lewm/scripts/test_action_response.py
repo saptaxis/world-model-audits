@@ -3,7 +3,10 @@
 
 Tests whether the predictor understands that:
 - Main thrust → vy increases (upward acceleration)
-- Side thrust → angle/angular_vel changes
+- Side thrust → angular_vel / angle changes (sign convention: action[1]=+1
+  fires the right engine which produces NEGATIVE Δang_vel by Box2D physics;
+  action[1]=-1 produces POSITIVE Δang_vel — verified empirically across all
+  training datasets on 2026-04-19)
 - No action → vy decreases (gravity pulls down)
 
 Does NOT use CEM or planning. Just:
@@ -11,7 +14,7 @@ Does NOT use CEM or planning. Just:
 2. Encode → z history (3 frames)
 3. Predict z_{t+1} with different actions
 4. Decode via state head → kinematics
-5. Compare: does the predicted kinematic change in the right direction?
+5. Compare: does the predicted kinematic change in the right (physics-correct) direction?
 
 Usage:
     CUDA_VISIBLE_DEVICES=0 python lewm/scripts/test_action_response.py \
@@ -19,14 +22,33 @@ Usage:
         --state-head /path/to/state_head.pt \
         --dataset lunarlander_synthetic_heuristic \
         --cache-dir ~/vsr-tmp/lewm-datasets \
+        --output-dir /path/to/run-dir/action_response_heuristic/ \
         --n-frames 200
 """
 import argparse
+import io
 import sys
 from pathlib import Path
 
 import numpy as np
 import torch
+
+
+class Tee(io.TextIOBase):
+    """Write to multiple streams simultaneously. Used when --output-dir is set
+    to mirror stdout into an action_response_report.txt file."""
+
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, data):
+        for s in self.streams:
+            s.write(data)
+        return len(data)
+
+    def flush(self):
+        for s in self.streams:
+            s.flush()
 
 # Repo root (for lewm.*), lewm/ (for eval.*), vendor/le-wm/ (for pickle: jepa, module)
 REPO_ROOT = str(Path(__file__).resolve().parent.parent.parent)
@@ -87,7 +109,24 @@ def main():
                    help="Number of test transitions")
     p.add_argument("--frameskip", type=int, default=10)
     p.add_argument("--device", default="cuda")
+    p.add_argument("--output-dir", default=None,
+                   help="If set, writes action_response_report.txt here "
+                        "in addition to stdout.")
     args = p.parse_args()
+
+    # Tee stdout to a report file if requested.
+    _report_file = None
+    if args.output_dir is not None:
+        output_dir = Path(args.output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        _report_file = open(output_dir / "action_response_report.txt", "w")
+        sys.stdout = Tee(sys.__stdout__, _report_file)
+        print(f"Writing report to {output_dir / 'action_response_report.txt'}")
+        print(f"Model: {args.model}")
+        print(f"State head: {args.state_head}")
+        print(f"Dataset: {args.dataset}")
+        print(f"N frames: {args.n_frames}, frameskip: {args.frameskip}")
+        print()
 
     device = torch.device(args.device)
 
@@ -213,19 +252,22 @@ def main():
     print(f"\n2. No action → vy decreases (gravity)")
     print(f"   Direction accuracy: {acc:.1%}  (mean Δvy: {md:+.4f})")
 
-    # Test 3: Side right thrust → angle changes (angular_vel increases)
-    acc_av = direction_accuracy(decoded["side_right"], decoded["no_action"], 5, +1)
+    # Test 3: Side right thrust (action[1]=+1) → angular_vel DECREASES (vs no_action)
+    # Sign convention: action[1]=+1 fires the right engine, which by Box2D
+    # physics applies a counter-torque that makes Δang_vel NEGATIVE.
+    # Verified empirically on all 7 training datasets with side-thrust frames.
+    acc_av = direction_accuracy(decoded["side_right"], decoded["no_action"], 5, -1)
     md_av = mean_diff(decoded["side_right"], decoded["no_action"], 5)
-    acc_a = direction_accuracy(decoded["side_right"], decoded["no_action"], 4, +1)
+    acc_a = direction_accuracy(decoded["side_right"], decoded["no_action"], 4, -1)
     md_a = mean_diff(decoded["side_right"], decoded["no_action"], 4)
-    print(f"\n3. Side right thrust → angular_vel / angle change (vs no_action)")
+    print(f"\n3. Side right thrust (action[1]=+1) → angular_vel DECREASES (vs no_action)")
     print(f"   ang_vel direction accuracy: {acc_av:.1%}  (mean Δang_vel: {md_av:+.4f})")
     print(f"   angle direction accuracy:   {acc_a:.1%}  (mean Δangle: {md_a:+.4f})")
 
-    # Test 4: Side left thrust → opposite of side right
-    acc_av = direction_accuracy(decoded["side_left"], decoded["no_action"], 5, -1)
+    # Test 4: Side left thrust (action[1]=-1) → angular_vel INCREASES (opposite of right)
+    acc_av = direction_accuracy(decoded["side_left"], decoded["no_action"], 5, +1)
     md_av = mean_diff(decoded["side_left"], decoded["no_action"], 5)
-    print(f"\n4. Side left thrust → angular_vel decreases (vs no_action)")
+    print(f"\n4. Side left thrust (action[1]=-1) → angular_vel INCREASES (vs no_action)")
     print(f"   ang_vel direction accuracy: {acc_av:.1%}  (mean Δang_vel: {md_av:+.4f})")
 
     # Test 5: Symmetry — left vs right produce opposite angle changes
@@ -321,12 +363,12 @@ def main():
                       rollouts["no_action"][step], 3)
         print(f"  {step+1:>5d}  {acc:>8.1%}  {md:>+10.4f}")
 
-    # Compare side_right vs no_action at each step
-    print("\nSide right vs no_action — ang_vel direction accuracy per step:")
+    # Compare side_right vs no_action at each step (expected: Δang_vel NEGATIVE)
+    print("\nSide right vs no_action — ang_vel direction accuracy per step (expect Δang_vel<0):")
     print(f"  {'step':>5s}  {'accuracy':>8s}  {'mean Δang_vel':>14s}")
     for step in range(N_ROLLOUT):
         acc = direction_accuracy(rollouts["side_right"][step],
-                                rollouts["no_action"][step], 5, +1)
+                                rollouts["no_action"][step], 5, -1)
         md = mean_diff(rollouts["side_right"][step],
                       rollouts["no_action"][step], 5)
         print(f"  {step+1:>5d}  {acc:>8.1%}  {md:>+14.4f}")
@@ -364,6 +406,11 @@ def main():
         md = mean_diff(impulse_main[step], baseline_none[step], 3)
         note = "← impulse step" if step == 0 else "← coasting (no action)"
         print(f"  {step+1:>5d}  {acc:>8.1%}  {md:>+10.4f}  {note:>20s}")
+
+    # Close the report file if we opened one.
+    if _report_file is not None:
+        sys.stdout = sys.__stdout__
+        _report_file.close()
 
 
 if __name__ == "__main__":
