@@ -186,6 +186,13 @@ def encode_predicted(
         else:
             selected = valid_eps
             n_trans = total_trans
+        if not selected:
+            raise ValueError(
+                f"No episodes in {dataset_name} have enough frames to form a "
+                f"(HS={HS}) transition at fs={fs}. "
+                f"Valid episodes: {len(valid_eps)}, max_frames={max_frames}. "
+                f"Either drop this dataset, raise max_frames, or reduce HS/fs."
+            )
         # Sort by offset so adjacent episodes merge into contiguous HDF5 reads.
         selected.sort(key=lambda x: int(ep_offset[x[0]]))
         print(f"  {n_trans} transitions from {len(selected)} episodes")
@@ -444,6 +451,15 @@ def encode_predicted_aligned(
         else:
             selected = valid_eps
             n_pairs = total_pairs
+        if not selected:
+            raise ValueError(
+                f"No episodes in {dataset_name} have enough frames for an "
+                f"aligned window (ctx_len={ctx_len}, n_preds={n_preds}, "
+                f"num_steps={num_steps}) at fs={fs}. "
+                f"Valid episodes: {len(valid_eps)}, max_frames={max_frames}. "
+                f"Either drop this dataset, raise max_frames, or lower "
+                f"ctx_len+n_preds to match short episodes."
+            )
         # Sort by offset so adjacent episodes merge into contiguous HDF5 reads.
         selected.sort(key=lambda x: int(ep_offset[x[0]]))
         print(f"  {n_pairs} aligned pairs from {len(selected)} episodes "
