@@ -26,6 +26,7 @@ def rollout_episode(
     pixels: torch.Tensor,
     actions: torch.Tensor,
     history_size: int = 3,
+    n_preds: int = 1,
     device: str = "cuda",
     act_mean: np.ndarray | None = None,
     act_std: np.ndarray | None = None,
@@ -33,55 +34,66 @@ def rollout_episode(
 ) -> dict:
     """Rollout one episode: encode seed frames, predict autoregressively, decode states.
 
+    Stride-1, n_preds-aware autoregression (matches training predictor's
+    intended semantics at inference time):
+
+      - Seed the first (history_size + n_preds - 1) latents from pixels.
+      - For each target position t from seed onward, let c = t - n_preds.
+        History window is z_pred[c-HS+1 : c+1] (length history_size, ending
+        at position c). Run predictor once and take pred[:, -1], which is
+        the max-context output position predicting c + n_preds = t. Append
+        as z_t. Advance t by 1.
+
+    For n_preds=1: seed = history_size; history ends at t-1; one new latent
+    per logical step. (Matches the prior rollout semantics for np=1.)
+    For n_preds=2: seed = history_size + 1; history ends at t-2; still one
+    new latent per logical step, each using the strongest output position.
+
     If act_mean/act_std are provided, actions are z-score normalized per raw
-    action dim before being fed to the action_encoder (mirrors training for
-    norm-trained checkpoints). Actions come out of HDF5Dataset shape (T, fs*2)
-    where each row is row-major-flattened (raw0_a0, raw0_a1, raw1_a0, ...),
-    so normalization tiles the (2,) mean/std across the fs raw frames.
+    action dim before action_encoder (mirrors training for norm-trained
+    checkpoints). Actions come out of HDF5Dataset shape (T, fs*action_dim)
+    row-major-flattened (raw0_a0, raw0_a1, raw1_a0, ...); normalization
+    tiles the (action_dim,) mean/std across the fs raw frames.
 
-    If z_slice is provided, z is sliced before feeding to state_head (for heads
-    trained on a z-subspace, e.g. (0, 16) for v2's dedicated z_kin block).
-
-    NOTE on num_preds>1: this rollout advances history by one logical position
-    per iteration regardless of the predictor's training n_preds. For n_preds>1
-    checkpoints the rollout is off-regime (predictor's pred[:, -1] is n_preds
-    steps ahead, but the loop integrates it as if 1 step ahead). This keeps
-    the signal directionally interpretable but the time axis is compressed by
-    n_preds. A proper n_preds-aware rollout would advance by n_preds each iter.
+    If z_slice is provided, z is sliced before state_head (for heads trained
+    on a z-subspace, e.g. (0, 16) for v2's dedicated z_kin block).
     """
     device = torch.device(device)
     model.eval()
     state_head.eval()
     T = len(pixels)
     HS = history_size
+    NP = n_preds
+    seed = HS + NP - 1  # real latents required before rollout can start
 
     with torch.no_grad():
         px = pixels.to(device)
         output = model.encoder(px, interpolate_pos_encoding=True)
         z_gt = model.projector(output.last_hidden_state[:, 0])
 
-        z_pred = z_gt[:HS].clone()
         actions_t = actions.to(device)
         actions_t = torch.nan_to_num(actions_t, 0.0)
         if act_mean is not None:
-            # actions_t: (T, fs*action_dim=20). Reshape -> (T, fs, action_dim)
-            # so (2,) mean/std broadcasts over the last dim, then flatten back.
+            # actions_t: (T, fs*action_dim). Reshape -> (T, fs, action_dim) so
+            # (action_dim,) mean/std broadcasts over the last dim, then flatten back.
             act_dim = len(act_mean)
             fs = actions_t.shape[1] // act_dim
             m = torch.from_numpy(act_mean).to(device)
             s = torch.from_numpy(act_std).to(device)
             actions_t = ((actions_t.view(T, fs, act_dim) - m) / s).reshape(T, fs * act_dim)
-        act_so_far = actions_t[:HS].unsqueeze(0)
 
-        for t in range(HS, T):
-            act_emb = model.action_encoder(act_so_far)
-            z_trunc = z_pred[-HS:].unsqueeze(0)
-            act_trunc = act_emb[:, -HS:]
-            pred = model.predict(z_trunc, act_trunc)[:, -1]
-            z_pred = torch.cat([z_pred, pred], dim=0)
-            act_so_far = torch.cat(
-                [act_so_far, actions_t[t : t + 1].unsqueeze(0)], dim=1
-            )
+        if T <= seed:
+            # Episode shorter than seed window; nothing to roll out.
+            z_pred = z_gt.clone()
+        else:
+            z_pred = z_gt[:seed].clone()  # (seed, D) real latents from pixels
+            for t in range(seed, T):
+                c = t - NP  # last position in the conditioning context
+                z_hist = z_pred[c - HS + 1 : c + 1].unsqueeze(0)        # (1, HS, D)
+                act_hist = actions_t[c - HS + 1 : c + 1].unsqueeze(0)   # (1, HS, fs*act_dim)
+                act_emb = model.action_encoder(act_hist)
+                pred = model.predict(z_hist, act_emb)[:, -1]            # (1, D)
+                z_pred = torch.cat([z_pred, pred], dim=0)
 
         z_for_head = z_pred if z_slice is None else z_pred[..., z_slice[0]:z_slice[1]]
         predicted_states = state_head(z_for_head).cpu().numpy()
@@ -161,9 +173,8 @@ def rollout_episodes(
     else:
         print(f"  action normalizer OFF (raw actions fed to action_encoder)")
 
-    print(f"  ctx_len={ctx_len}, n_preds={n_preds}"
-          + (" (rollout will advance 1 logical step per iter; off-regime for n_preds>1)"
-             if n_preds > 1 else ""))
+    print(f"  ctx_len={ctx_len}, n_preds={n_preds} "
+          f"(seed = {ctx_len + n_preds - 1} real latents, stride-1 autoregression)")
 
     transform = get_img_preprocessor(source="pixels", target="pixels", img_size=224)
 
@@ -250,7 +261,8 @@ def rollout_episodes(
         gt_states = sample["state"].numpy()[:, :6]
 
         rollout = rollout_episode(
-            model, state_head, pixels, actions, history_size=ctx_len, device=device,
+            model, state_head, pixels, actions,
+            history_size=ctx_len, n_preds=n_preds, device=device,
             act_mean=act_mean, act_std=act_std, z_slice=z_slice,
         )
         rollout["actual_states"] = gt_states

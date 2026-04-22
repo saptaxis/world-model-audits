@@ -43,10 +43,9 @@ def main():
                         help="Training history_size / context length (must match training config).")
     parser.add_argument("--n-preds", type=int, default=1,
                         help="Training num_preds / prediction horizon (must match training config). "
-                             "NOTE: rollout currently advances by 1 logical position per iter "
-                             "regardless of n_preds. For n_preds>1 the rollout is off-regime — "
-                             "pred[:, -1] is n_preds ahead but the loop treats it as 1-ahead. "
-                             "Signal is still directional but the time axis is compressed.")
+                             "Rollout is stride-1 and n_preds-aware: seeds ctx_len+n_preds-1 real "
+                             "latents from pixels, each iter predicts z_t from history ending at "
+                             "t-n_preds using pred[:, -1].")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--normalize-actions", action=argparse.BooleanOptionalAction,
                         default=True,
