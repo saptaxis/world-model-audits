@@ -27,8 +27,28 @@ def rollout_episode(
     actions: torch.Tensor,
     history_size: int = 3,
     device: str = "cuda",
+    act_mean: np.ndarray | None = None,
+    act_std: np.ndarray | None = None,
+    z_slice: tuple[int, int] | None = None,
 ) -> dict:
-    """Rollout one episode: encode seed frames, predict autoregressively, decode states."""
+    """Rollout one episode: encode seed frames, predict autoregressively, decode states.
+
+    If act_mean/act_std are provided, actions are z-score normalized per raw
+    action dim before being fed to the action_encoder (mirrors training for
+    norm-trained checkpoints). Actions come out of HDF5Dataset shape (T, fs*2)
+    where each row is row-major-flattened (raw0_a0, raw0_a1, raw1_a0, ...),
+    so normalization tiles the (2,) mean/std across the fs raw frames.
+
+    If z_slice is provided, z is sliced before feeding to state_head (for heads
+    trained on a z-subspace, e.g. (0, 16) for v2's dedicated z_kin block).
+
+    NOTE on num_preds>1: this rollout advances history by one logical position
+    per iteration regardless of the predictor's training n_preds. For n_preds>1
+    checkpoints the rollout is off-regime (predictor's pred[:, -1] is n_preds
+    steps ahead, but the loop integrates it as if 1 step ahead). This keeps
+    the signal directionally interpretable but the time axis is compressed by
+    n_preds. A proper n_preds-aware rollout would advance by n_preds each iter.
+    """
     device = torch.device(device)
     model.eval()
     state_head.eval()
@@ -43,6 +63,14 @@ def rollout_episode(
         z_pred = z_gt[:HS].clone()
         actions_t = actions.to(device)
         actions_t = torch.nan_to_num(actions_t, 0.0)
+        if act_mean is not None:
+            # actions_t: (T, fs*action_dim=20). Reshape -> (T, fs, action_dim)
+            # so (2,) mean/std broadcasts over the last dim, then flatten back.
+            act_dim = len(act_mean)
+            fs = actions_t.shape[1] // act_dim
+            m = torch.from_numpy(act_mean).to(device)
+            s = torch.from_numpy(act_std).to(device)
+            actions_t = ((actions_t.view(T, fs, act_dim) - m) / s).reshape(T, fs * act_dim)
         act_so_far = actions_t[:HS].unsqueeze(0)
 
         for t in range(HS, T):
@@ -55,7 +83,8 @@ def rollout_episode(
                 [act_so_far, actions_t[t : t + 1].unsqueeze(0)], dim=1
             )
 
-        predicted_states = state_head(z_pred).cpu().numpy()
+        z_for_head = z_pred if z_slice is None else z_pred[..., z_slice[0]:z_slice[1]]
+        predicted_states = state_head(z_for_head).cpu().numpy()
 
     return {
         "predicted_states": predicted_states,
@@ -97,6 +126,10 @@ def rollout_episodes(
     rgb_dataset_name: str | None = None,
     device: str = "cuda",
     seed: int = 42,
+    normalize_actions: bool = True,
+    action_norm_ref: str = "lunarlander_synthetic_heuristic_clean",
+    ctx_len: int = 3,
+    n_preds: int = 1,
 ) -> list[dict]:
     """Rollout multiple episodes and return results.
 
@@ -113,7 +146,24 @@ def rollout_episodes(
     model = torch.load(model_path, map_location=device_t, weights_only=False)
     model.eval()
 
-    state_head, _ = load_state_head(state_head_path, device=device)
+    state_head, sh_metrics = load_state_head(state_head_path, device=device)
+    z_slice = sh_metrics.get("z_slice")  # (start, end) or None for full z
+    if z_slice is not None:
+        print(f"  state head expects sliced z [{z_slice[0]}:{z_slice[1]}]")
+
+    # Optional action normalizer (mirrors training for norm-trained checkpoints).
+    act_mean = act_std = None
+    if normalize_actions:
+        from .action_norm import compute_action_normalizer
+        act_mean, act_std = compute_action_normalizer(action_norm_ref, cache_dir)
+        print(f"  action normalizer ON (ref={action_norm_ref}): "
+              f"mean={act_mean.tolist()} std={act_std.tolist()}")
+    else:
+        print(f"  action normalizer OFF (raw actions fed to action_encoder)")
+
+    print(f"  ctx_len={ctx_len}, n_preds={n_preds}"
+          + (" (rollout will advance 1 logical step per iter; off-regime for n_preds>1)"
+             if n_preds > 1 else ""))
 
     transform = get_img_preprocessor(source="pixels", target="pixels", img_size=224)
 
@@ -200,7 +250,8 @@ def rollout_episodes(
         gt_states = sample["state"].numpy()[:, :6]
 
         rollout = rollout_episode(
-            model, state_head, pixels, actions, device=device,
+            model, state_head, pixels, actions, history_size=ctx_len, device=device,
+            act_mean=act_mean, act_std=act_std, z_slice=z_slice,
         )
         rollout["actual_states"] = gt_states
         rollout["actions"] = actions.numpy()

@@ -79,16 +79,20 @@ def encode_frames(model, pixels_uint8, device):
     return z
 
 
-def predict_one_step(model, z_history, action_2d, frameskip, device):
+def predict_one_step(model, z_history, action_2d, frameskip, device,
+                     act_mean=None, act_std=None):
     """Given z history (N, HS, D) and a 2D action, predict z_{t+1}.
 
-    Action is repeated `frameskip` times and concatenated to match training
-    action_dim = frameskip * 2 = 20.
+    Action is z-score normalized per raw-action dim (if act_mean/act_std
+    provided, mirroring training for norm-trained checkpoints), then repeated
+    `frameskip` times to match training action_dim = frameskip * 2 = 20.
     """
     N, HS, D = z_history.shape
-    # Build action: repeat the 2D action `frameskip` times → (N, HS, frameskip*2)
-    act_single = torch.tensor(action_2d, dtype=torch.float32, device=device)
-    act_repeated = act_single.repeat(frameskip)  # (20,)
+    act_vec = np.asarray(action_2d, dtype=np.float32)
+    if act_mean is not None:
+        act_vec = (act_vec - act_mean) / act_std
+    act_single = torch.from_numpy(act_vec).to(device)
+    act_repeated = act_single.repeat(frameskip)  # (fs * action_dim,)
     act = act_repeated.unsqueeze(0).unsqueeze(0).expand(N, HS, -1)  # (N, HS, 20)
 
     with torch.no_grad():
@@ -108,33 +112,73 @@ def main():
     p.add_argument("--n-frames", type=int, default=200,
                    help="Number of test transitions")
     p.add_argument("--frameskip", type=int, default=10)
+    p.add_argument("--ctx-len", type=int, default=3,
+                   help="Training history_size / context length (must match training config).")
+    p.add_argument("--n-preds", type=int, default=1,
+                   help="Training num_preds / prediction horizon (must match training config). "
+                        "The predictor's pred[:, -1] is n_preds steps ahead of the last history "
+                        "position, so GT is state[t + n_preds]. Default 1.")
     p.add_argument("--device", default="cuda")
     p.add_argument("--output-dir", default=None,
                    help="If set, writes action_response_report.txt here "
                         "in addition to stdout.")
+    p.add_argument("--normalize-actions", action=argparse.BooleanOptionalAction,
+                   default=True,
+                   help="z-score normalize actions before action_encoder. Default ON. "
+                        "Pass --no-normalize-actions for broken-regime multi-dataset "
+                        "checkpoints (pre ConcatDataset transform-propagation fix; see "
+                        "e5-05). Report filename includes _normZ vs _normRaw so runs "
+                        "don't overwrite.")
+    p.add_argument("--action-norm-ref", default="lunarlander_synthetic_heuristic_clean",
+                   help="Reference dataset for reproducing training's action normalizer. "
+                        "Only consulted when --normalize-actions is set.")
     args = p.parse_args()
 
-    # Tee stdout to a report file if requested.
+    # Resolve action normalizer up-front so the report can state it.
+    act_mean = act_std = None
+    norm_tag = "Raw"
+    if args.normalize_actions:
+        from lewm.eval.action_norm import compute_action_normalizer
+        act_mean, act_std = compute_action_normalizer(args.action_norm_ref, args.cache_dir)
+        norm_tag = "Z"
+
+    # Tee stdout to a report file if requested. Report filename encodes
+    # normalization mode so norm-ON and norm-OFF runs in the same dir don't
+    # overwrite each other.
     _report_file = None
     if args.output_dir is not None:
         output_dir = Path(args.output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
-        _report_file = open(output_dir / "action_response_report.txt", "w")
+        report_path = output_dir / f"action_response_report_norm{norm_tag}.txt"
+        _report_file = open(report_path, "w")
         sys.stdout = Tee(sys.__stdout__, _report_file)
-        print(f"Writing report to {output_dir / 'action_response_report.txt'}")
+        print(f"Writing report to {report_path}")
         print(f"Model: {args.model}")
         print(f"State head: {args.state_head}")
         print(f"Dataset: {args.dataset}")
-        print(f"N frames: {args.n_frames}, frameskip: {args.frameskip}")
+        print(f"N frames: {args.n_frames}, frameskip: {args.frameskip}, ctx_len: {args.ctx_len}, n_preds: {args.n_preds}")
+        print(f"Action normalization: {'ON (ref=' + args.action_norm_ref + ')' if args.normalize_actions else 'OFF (raw actions)'}")
+        if args.normalize_actions:
+            print(f"  mean={act_mean.tolist()}  std={act_std.tolist()}")
         print()
 
     device = torch.device(args.device)
 
-    # Load model + state head
+    # Load model + state head. The state head may have been trained with --z-dims
+    # (e.g. 0:16 for v2's dedicated z_kin block). load_state_head surfaces the
+    # z_slice in metrics; we must slice z before feeding to the head.
     model = torch.load(args.model, map_location=device, weights_only=False)
     model.eval()
-    state_head, _ = load_state_head(args.state_head, device=args.device)
+    state_head, sh_metrics = load_state_head(args.state_head, device=args.device)
     state_head.eval()
+    z_slice = sh_metrics.get("z_slice")  # (start, end) or None
+    if z_slice is not None:
+        print(f"State head expects sliced z [{z_slice[0]}:{z_slice[1]}] — slicing predictions accordingly")
+
+    def decode(z):
+        """Apply state head to (B, D) predicted z, honoring z_slice if set."""
+        z_in = z if z_slice is None else z[..., z_slice[0]:z_slice[1]]
+        return state_head(z_in).cpu().numpy()
 
     # Load dataset frames (need 3 consecutive frames at frameskip for history)
     import h5py
@@ -150,9 +194,11 @@ def main():
         pixels_all = f["pixels"]
         state_all = f["state"]
 
-        HS = 3  # history size
+        HS = args.ctx_len  # history size (matches training)
         fs = args.frameskip
-        min_len = (HS + 1) * fs  # need HS frames + 1 next frame
+        NP = args.n_preds  # prediction horizon; predictor's last output is NP steps ahead
+        # Need HS history frames + NP lookahead frames.
+        min_len = (HS + NP) * fs
 
         # Sample random transitions from episodes long enough.
         # Read contiguous episode slices (not fancy indexing) for speed.
@@ -163,7 +209,7 @@ def main():
 
         history_pixels = []  # (N, HS, H, W, 3)
         gt_states_t = []     # (N, 6) state at t (last history frame)
-        gt_states_tp1 = []   # (N, 6) state at t+1
+        gt_states_tp1 = []   # (N, 6) state at t + NP (what predictor targets)
 
         for ep in valid_eps:
             if len(history_pixels) >= n:
@@ -171,22 +217,23 @@ def main():
             base = int(ep_offset[ep])
             raw_len = int(ep_len[ep])
             n_output = raw_len // fs
-            if n_output < HS + 1:
+            if n_output < HS + NP:
                 continue
 
             # Contiguous slice: all output-step frames for this episode
             ep_pixels = pixels_all[base:base + n_output * fs:fs]  # (n_output, H, W, 3)
             ep_states = state_all[base:base + n_output * fs:fs]   # (n_output, state_dim)
 
-            # Pick random transitions within this episode
-            n_avail = n_output - HS
+            # Pick random transitions: need t_start+HS-1 (last history) and
+            # t_start+HS-1+NP (target state) to exist.
+            n_avail = n_output - (HS - 1) - NP
             n_pick = min(n_avail, n - len(history_pixels))
             t_starts = rng.choice(n_avail, size=n_pick, replace=False)
 
             for t_start in t_starts:
                 history_pixels.append(ep_pixels[t_start:t_start + HS])
                 gt_states_t.append(ep_states[t_start + HS - 1, :6])
-                gt_states_tp1.append(ep_states[t_start + HS, :6])
+                gt_states_tp1.append(ep_states[t_start + HS - 1 + NP, :6])
 
     history_pixels = np.array(history_pixels)  # (N, HS, H, W, 3)
     gt_states_t = np.array(gt_states_t)        # (N, 6)
@@ -212,15 +259,16 @@ def main():
     # Predict z_{t+1} for each action, decode via state head
     decoded = {}
     for name, act in actions.items():
-        z_next = predict_one_step(model, z_history, act, args.frameskip, device)
+        z_next = predict_one_step(model, z_history, act, args.frameskip, device,
+                                  act_mean=act_mean, act_std=act_std)
         with torch.no_grad():
-            kin = state_head(z_next).cpu().numpy()  # (N, 6)
+            kin = decode(z_next)  # (N, 6); honors z_slice if state head is sliced
         decoded[name] = kin
 
     # Also decode z_t (last history frame) for reference
     with torch.no_grad():
         z_t = z_history[:, -1]
-        kin_t = state_head(z_t).cpu().numpy()
+        kin_t = decode(z_t)
 
     # ============================================================
     # Direction tests
@@ -336,12 +384,12 @@ def main():
     def rollout_n_steps(model, z_hist, action_2d, n_steps, frameskip, device, state_head):
         """Autoregressive rollout: predict n_steps ahead with constant action."""
         z_h = z_hist.clone()  # (N, HS, D)
-        HS = z_h.shape[1]
         decoded_per_step = []
-        for step in range(n_steps):
-            z_next = predict_one_step(model, z_h, action_2d, frameskip, device)
+        for _ in range(n_steps):
+            z_next = predict_one_step(model, z_h, action_2d, frameskip, device,
+                                      act_mean=act_mean, act_std=act_std)
             with torch.no_grad():
-                kin = state_head(z_next).cpu().numpy()
+                kin = decode(z_next)
             decoded_per_step.append(kin)
             # Shift history: drop oldest, append new
             z_h = torch.cat([z_h[:, 1:, :], z_next.unsqueeze(1)], dim=1)
@@ -380,14 +428,14 @@ def main():
     def rollout_impulse(model, z_hist, impulse_action, n_steps, frameskip, device, state_head):
         """Step 0: impulse_action. Steps 1+: no_action."""
         z_h = z_hist.clone()
-        HS = z_h.shape[1]
         no_act = [0.0, 0.0]
         decoded_per_step = []
         for step in range(n_steps):
             act = impulse_action if step == 0 else no_act
-            z_next = predict_one_step(model, z_h, act, frameskip, device)
+            z_next = predict_one_step(model, z_h, act, frameskip, device,
+                                      act_mean=act_mean, act_std=act_std)
             with torch.no_grad():
-                kin = state_head(z_next).cpu().numpy()
+                kin = decode(z_next)
             decoded_per_step.append(kin)
             z_h = torch.cat([z_h[:, 1:, :], z_next.unsqueeze(1)], dim=1)
         return decoded_per_step
