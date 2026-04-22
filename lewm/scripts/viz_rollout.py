@@ -39,7 +39,24 @@ def main():
                         help="Where to start clips within episodes")
     parser.add_argument("--rgb-dataset", default=None,
                         help="HDF5 dataset name for RGB frames (optional)")
+    parser.add_argument("--ctx-len", type=int, default=3,
+                        help="Training history_size / context length (must match training config).")
+    parser.add_argument("--n-preds", type=int, default=1,
+                        help="Training num_preds / prediction horizon (must match training config). "
+                             "NOTE: rollout currently advances by 1 logical position per iter "
+                             "regardless of n_preds. For n_preds>1 the rollout is off-regime — "
+                             "pred[:, -1] is n_preds ahead but the loop treats it as 1-ahead. "
+                             "Signal is still directional but the time axis is compressed.")
     parser.add_argument("--device", default="cuda")
+    parser.add_argument("--normalize-actions", action=argparse.BooleanOptionalAction,
+                        default=True,
+                        help="z-score normalize actions before action_encoder. Default ON. "
+                             "Pass --no-normalize-actions for broken-regime multi-dataset "
+                             "checkpoints (pre ConcatDataset transform-propagation fix; see "
+                             "e5-05).")
+    parser.add_argument("--action-norm-ref", default="lunarlander_synthetic_heuristic_clean",
+                        help="Reference dataset for reproducing training's action normalizer. "
+                             "Only consulted when --normalize-actions is set.")
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
@@ -57,6 +74,10 @@ def main():
         start_mode=args.start_mode,
         rgb_dataset_name=args.rgb_dataset,
         device=args.device,
+        normalize_actions=args.normalize_actions,
+        action_norm_ref=args.action_norm_ref,
+        ctx_len=args.ctx_len,
+        n_preds=args.n_preds,
     )
 
     print(f"Rendering videos...")

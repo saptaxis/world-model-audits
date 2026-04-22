@@ -104,17 +104,35 @@ def train_state_head(
     }
 
 
-def save_state_head(head: StateHead, metrics: dict, path: str):
-    """Save state head checkpoint + metrics."""
-    torch.save({"model": head.state_dict(), "metrics": metrics}, path)
+def save_state_head(head: StateHead, metrics: dict, path: str, z_slice=None):
+    """Save state head checkpoint + metrics.
+
+    z_slice: optional (start, end) tuple recording which z dims this head expects.
+    Downstream loaders must re-apply the same slice before calling the head.
+    """
+    ckpt = {"model": head.state_dict(), "metrics": metrics,
+            "linear": head.linear, "z_slice": z_slice}
+    torch.save(ckpt, path)
     print(f"Saved state head to {path}")
 
 
 def load_state_head(path: str, device: str = "cpu") -> tuple[StateHead, dict]:
-    """Load state head from checkpoint."""
+    """Load state head from checkpoint.
+
+    If the saved head was trained on a z-slice (via --z-dims), the returned
+    metrics dict carries a 'z_slice' entry with (start, end); callers must slice
+    z accordingly before forward().
+    """
     ckpt = torch.load(path, map_location=device, weights_only=False)
-    head = StateHead()
+    linear = ckpt.get("linear", False)
+    z_slice = ckpt.get("z_slice")
+    # Infer z_dim from saved weights so sliced heads load cleanly.
+    first_w = ckpt["model"]["net.weight"] if linear else ckpt["model"]["net.0.weight"]
+    z_dim = first_w.shape[1]
+    head = StateHead(z_dim=z_dim, linear=linear)
     head.load_state_dict(ckpt["model"])
     head.to(device)
     head.eval()
-    return head, ckpt["metrics"]
+    metrics = dict(ckpt["metrics"])
+    metrics["z_slice"] = z_slice
+    return head, metrics

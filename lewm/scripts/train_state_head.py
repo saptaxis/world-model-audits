@@ -1,35 +1,81 @@
 #!/usr/bin/env python3
 """Train state head probe on LeWorldModel latents.
 
-Usage:
-    # Single dataset (backward compatible):
-    python lewm/scripts/train_state_head.py \
-        --model /path/to/lewm_object.ckpt \
-        --dataset lunarlander_heuristic \
-        --output-dir /path/to/state_head/ \
-        --max-frames 50000
+Encodes frames (or loads cached z's), trains MLP/linear probe, reports R²
+per dim. Supports three z sources:
+  - encoder z (default): pass `--dataset` only.
+  - predictor z, legacy single-position single-action mode: `--predicted-z`.
+  - predictor z, training-aligned mode (recommended): `--training-aligned`.
+    Mirrors train.py::lejepa_forward windowing exactly: T=ctx_len+n_preds
+    frames per window, ctx_len predicted positions emitted, real per-position
+    actions. Requires `--predicted-z`.
 
-    # Multiple datasets, N frames per dataset:
-    python lewm/scripts/train_state_head.py \
-        --model /path/to/lewm_object.ckpt \
-        --dataset lunarlander_synthetic_heuristic lunarlander_synthetic_free-fall ... \
-        --output-dir /path/to/state_head/ \
+Action normalization (`--normalize-actions`):
+    Training intent is to z-score actions via train.py:120's
+    get_column_normalizer. For SINGLE-dataset training configs this fires
+    correctly. For MULTI-dataset configs it silently does NOT fire (the
+    transform set on swm.data.ConcatDataset is never read — see
+    e5-05-action-norm-bug-and-invalidations-Apr222026.md). So whether to
+    normalize here depends on what the trained checkpoint actually saw:
+      - heur-only / any single-dataset training: --normalize-actions ON
+      - v1/v2 / any multi-dataset training before the bug fix: OFF
+      - any multi-dataset training AFTER the bug fix: ON
+
+Sliced probes (`--z-dims START:END`):
+    Slice z to a specific block before probing. Use 0:16 for v2's dedicated
+    z_kin block. Cache stores the full z; slicing happens post-load so
+    multiple slice runs reuse one cache.
+
+Cache filenames distinguish modes so different settings cannot silently
+reuse stale caches:
+  - encoder mode: encoded_z[_<ds>].npz
+  - predicted-z legacy: predicted_z[_<ds>].npz
+  - predicted-z aligned: predicted_z_aligned_ctx{C}_np{P}_norm{Raw,Z}[_<ds>].npz
+
+Usage patterns
+--------------
+Encoder z, multiple datasets:
+    python lewm/scripts/train_state_head.py \\
+        --model /path/to/lewm_object.ckpt \\
+        --dataset lunarlander_synthetic_heuristic_clean ... \\
+        --output-dir /path/to/state_head/ \\
         --max-frames-per-dataset 5000
 
-    # Multiple datasets, N frames total (split evenly):
-    python lewm/scripts/train_state_head.py \
-        --model /path/to/lewm_object.ckpt \
-        --dataset lunarlander_synthetic_heuristic lunarlander_synthetic_free-fall ... \
-        --output-dir /path/to/state_head/ \
-        --max-frames 50000
+E5-03 heur-only ep30 (single-dataset, normalization fired in training):
+    python lewm/scripts/train_state_head.py \\
+        --model /.../synthetic-heuristic-fs10/lewm_..._object.ckpt \\
+        --dataset lunarlander_synthetic_heuristic \\
+        --output-dir /.../state_head_aligned \\
+        --predicted-z --training-aligned --ctx-len 3 --n-preds 1 \\
+        --normalize-actions --action-norm-ref lunarlander_synthetic_heuristic \\
+        --max-frames-per-dataset 75000 --val-split 0.25
 
-    # No limit — all frames from all datasets:
-    python lewm/scripts/train_state_head.py \
-        --model /path/to/lewm_object.ckpt \
-        --dataset lunarlander_synthetic_heuristic lunarlander_synthetic_free-fall ... \
-        --output-dir /path/to/state_head/
+v1 broken-regime multi-dataset (synthetic-all-clean-fs10-aux, num_preds=1):
+    python lewm/scripts/train_state_head.py \\
+        --model /.../synthetic-all-clean-fs10-aux/lewm_..._object.ckpt \\
+        --dataset <12 _clean datasets> \\
+        --output-dir /.../state_head_aligned \\
+        --predicted-z --training-aligned --ctx-len 3 --n-preds 1 \\
+        --max-frames-per-dataset 75000 --val-split 0.25
 
-Encodes frames (or loads cached z's), trains MLP probe, reports R² per dim.
+v2 broken-regime z_kin probe (synthetic-all-clean-fs10-zkin16-np2):
+    python lewm/scripts/train_state_head.py \\
+        --model /.../synthetic-all-clean-fs10-zkin16-np2/lewm_..._object.ckpt \\
+        --dataset <12 _clean datasets> \\
+        --output-dir /.../state_head_aligned \\
+        --predicted-z --training-aligned --ctx-len 3 --n-preds 2 \\
+        --z-dims 0:16 \\
+        --max-frames-per-dataset 75000 --val-split 0.25
+
+Future post-fix multi-dataset network (any num_preds, any kin_block):
+    python lewm/scripts/train_state_head.py \\
+        --model /.../<post-fix-ckpt>_object.ckpt \\
+        --dataset <list> \\
+        --output-dir /.../state_head_aligned \\
+        --predicted-z --training-aligned --ctx-len 3 --n-preds <P> \\
+        --normalize-actions \\
+        [--z-dims 0:<kin_block>] \\
+        --max-frames-per-dataset 75000 --val-split 0.25
 """
 
 import argparse
@@ -42,6 +88,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from eval.encode_dataset import encode_dataset
 from eval.state_head import train_state_head, save_state_head, KIN_DIM_NAMES
+from eval.action_norm import compute_action_normalizer
 
 
 def encode_predicted(
@@ -55,10 +102,16 @@ def encode_predicted(
     seed: int = 42,
     read_chunk_size: int = 10000,
 ):
-    """Generate predicted z's from the predictor (not encoder) for state head training.
+    """LEGACY: predicted-z cache, single-position-output + broadcasted-action.
 
-    For each transition: encode 3-frame history → run predictor with recorded
-    action → produce z_{t+1}_pred. Pair with GT state_{t+1}.
+    Kept for backward compat with prior probe results (and as a "this is what
+    the broken-pipeline numbers looked like" reference). For all new probes
+    use encode_predicted_aligned() via the --training-aligned flag.
+
+    For each transition: encode 3-frame history → run predictor with the action
+    AT the last history step, broadcast across all 3 history positions →
+    take only the last predicted z. Pair with GT state at t+HS. This pairing
+    DOES NOT match training's aux-loss windowing (see encode_predicted_aligned).
 
     Two-pass structure mirroring eval/encode_dataset.py::encode_dataset so
     encoder work amortizes across many episodes per HDF5 read + GPU launch
@@ -265,6 +318,268 @@ def encode_predicted(
     print(f"  z: {all_z.shape}, state: {all_state.shape}")
 
 
+def encode_predicted_aligned(
+    model_path: str,
+    dataset_name: str,
+    cache_dir: str,
+    output_path: str,
+    ctx_len: int = 3,
+    n_preds: int = 2,
+    normalize_actions: bool = False,
+    action_norm_ref: str = "lunarlander_synthetic_heuristic_clean",
+    device: str = "cuda",
+    batch_size: int = 256,
+    max_frames: int = 0,
+    seed: int = 42,
+    read_chunk_size: int = 10000,
+):
+    """Training-aligned predicted-z cache.
+
+    Mirrors train.py::lejepa_forward exactly for the aux-kinematic-loss
+    pipeline, so offline probes computed from this cache are directly
+    comparable to the co-trained state_head's validate/aux_kin_loss.
+
+    Training does:
+        ctx_emb = emb[:, :ctx_len]               # (B, ctx_len, D)
+        ctx_act = act_emb[:, :ctx_len]           # (B, ctx_len, A_emb)
+        pred_emb = model.predict(ctx_emb, ctx_act)   # (B, ctx_len, D)
+        aux_target = state[:, n_preds:, :6]      # (B, ctx_len, 6)
+
+    So each window (num_steps = ctx_len + n_preds output-step frames) emits
+    ctx_len (pred_emb[i], state[i + n_preds]) pairs. With ctx_len=3, n_preds=2:
+        pred[0] <-> state[t+2]
+        pred[1] <-> state[t+3]
+        pred[2] <-> state[t+4]
+    ARPredictor is causal, so pred[i] is conditioned on ctx_emb[:i+1] and
+    ctx_act[:i+1] (i.e. frames t..t+i).
+
+    CRITICAL (vs legacy encode_predicted):
+      - Actions are REAL per-position (not broadcast): at context position i,
+        the action input is the raw fs=10 action frames starting at raw
+        index (t + i) * fs, flattened to fs * action_dim.
+      - ALL ctx_len predicted positions are emitted (not just pred[-1]).
+
+    All indices `t`, `t + i`, `t + n_preds + i` are output-step indices
+    (post-frameskip). Raw-frame indices only appear inside the action-slice
+    expression `actions_raw[(t+i)*fs : (t+i+1)*fs]`.
+
+    max_frames caps the total number of emitted (pred, state) pairs.
+    """
+    import h5py
+    import hdf5plugin  # noqa: F401
+    import torch
+    from tqdm import tqdm
+
+    LEWM_DIR = Path(__file__).resolve().parent.parent / "vendor" / "le-wm"
+    sys.path.insert(0, str(LEWM_DIR))
+    import stable_worldmodel as swm
+
+    MEAN = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
+    STD = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
+
+    device_t = torch.device(device)
+    model = torch.load(model_path, map_location=device_t, weights_only=False)
+    model.eval()
+
+    fs = 10  # frameskip (hardcoded to match training)
+    num_steps = ctx_len + n_preds   # output-step window length
+    emit_per_window = ctx_len        # one pair per context position
+
+    print(f"  predicted_z mode: training_aligned ctx={ctx_len} np={n_preds} "
+          f"(num_steps={num_steps}, emit_per_window={emit_per_window})")
+
+    # Action normalization is controlled by `normalize_actions`.
+    # Background: train.py:120 sets up an action z-score normalizer via
+    # get_column_normalizer(ref_dataset, 'action', 'action'). For SINGLE-dataset
+    # training, transform is set on HDF5Dataset directly and the normalizer
+    # fires correctly. For MULTI-dataset training, transform is set on
+    # swm.data.ConcatDataset whose __getitem__ does NOT invoke transform — so
+    # the normalizer silently never runs (see e5-05). Whether to normalize here
+    # therefore depends on what the trained action_encoder actually saw at
+    # training time, which the caller must specify.
+    if normalize_actions:
+        act_mean, act_std = compute_action_normalizer(action_norm_ref, cache_dir,
+                                                      ctx_len, n_preds)
+        print(f"  action normalizer ON (ref={action_norm_ref}): "
+              f"mean={act_mean.tolist()} std={act_std.tolist()}")
+    else:
+        act_mean = act_std = None
+        print(f"  action normalizer OFF (raw actions fed to action_encoder)")
+
+    datasets_dir = swm.data.utils.get_cache_dir(cache_dir, sub_folder="datasets")
+    h5_path = Path(datasets_dir) / f"{dataset_name}.h5"
+
+    with h5py.File(h5_path, "r") as f:
+        ep_len = f["ep_len"][:]
+        ep_offset = f["ep_offset"][:]
+        n_episodes = len(ep_len)
+
+        # Count valid windows per episode in output-step units.
+        # A window at output-step t uses frames t..t+ctx_len-1 for context and
+        # state targets at t+n_preds..t+n_preds+ctx_len-1, so the last valid
+        # t satisfies t + num_steps - 1 < n_output, i.e. t <= n_output - num_steps.
+        valid_eps = []
+        total_pairs = 0
+        for ep in range(n_episodes):
+            raw_len = int(ep_len[ep])
+            n_output = raw_len // fs
+            n_windows_ep = max(0, n_output - num_steps + 1)
+            n_pairs_ep = n_windows_ep * emit_per_window
+            if n_windows_ep > 0:
+                valid_eps.append((ep, n_windows_ep))
+                total_pairs += n_pairs_ep
+
+        rng = np.random.default_rng(seed)
+        rng.shuffle(valid_eps)
+
+        if max_frames > 0:
+            selected = []
+            count = 0
+            for ep, n_w in valid_eps:
+                selected.append((ep, n_w))
+                count += n_w * emit_per_window
+                if count >= max_frames:
+                    break
+            n_pairs = min(count, max_frames)
+        else:
+            selected = valid_eps
+            n_pairs = total_pairs
+        # Sort by offset so adjacent episodes merge into contiguous HDF5 reads.
+        selected.sort(key=lambda x: int(ep_offset[x[0]]))
+        print(f"  {n_pairs} aligned pairs from {len(selected)} episodes "
+              f"({sum(n_w for _, n_w in selected)} windows)")
+
+        # ---------- Pass 1: batched encode across episodes ----------
+
+        ep_z: dict[int, np.ndarray] = {}          # ep_idx -> (n_output, D)
+        ep_state: dict[int, np.ndarray] = {}      # ep_idx -> (n_output, state_dim)
+        ep_action: dict[int, np.ndarray] = {}     # ep_idx -> (raw_len, 2)
+
+        def encode_chunk(chunk_start, chunk_end, members):
+            pixels_raw = f["pixels"][chunk_start:chunk_end]
+            states_raw = f["state"][chunk_start:chunk_end]
+            actions_raw = f["action"][chunk_start:chunk_end]
+            pix_list = []
+            per_ep_counts = []
+            for ep_idx, ep_base, raw_len in members:
+                n_output = raw_len // fs
+                ep_pix = pixels_raw[ep_base:ep_base + raw_len:fs][:n_output]
+                ep_sta = states_raw[ep_base:ep_base + raw_len:fs][:n_output]
+                ep_act = actions_raw[ep_base:ep_base + raw_len]
+                ep_state[ep_idx] = np.asarray(ep_sta, dtype=np.float32)
+                ep_action[ep_idx] = np.asarray(ep_act, dtype=np.float32)
+                pix_list.append(ep_pix)
+                per_ep_counts.append(n_output)
+            if not pix_list:
+                return
+            all_pix = np.concatenate(pix_list, axis=0)
+
+            z_parts = []
+            for s in range(0, all_pix.shape[0], batch_size):
+                e = min(s + batch_size, all_pix.shape[0])
+                p = torch.from_numpy(all_pix[s:e]).float().permute(0, 3, 1, 2) / 255.0
+                p = (p - MEAN) / STD
+                p = p.to(device_t, non_blocking=True)
+                with torch.no_grad():
+                    out = model.encoder(p, interpolate_pos_encoding=True)
+                    z = model.projector(out.last_hidden_state[:, 0])
+                z_parts.append(z.cpu().numpy())
+            all_z = np.concatenate(z_parts, axis=0)
+
+            offset = 0
+            for (ep_idx, _, _), n_out in zip(members, per_ep_counts):
+                ep_z[ep_idx] = all_z[offset:offset + n_out]
+                offset += n_out
+
+        chunk_start = int(ep_offset[selected[0][0]])
+        chunk_end = chunk_start + int(ep_len[selected[0][0]])
+        members = [(selected[0][0], 0, int(ep_len[selected[0][0]]))]
+
+        encode_pbar = tqdm(total=len(selected), desc="encoding", unit="ep")
+        for ep_idx, _ in selected[1:]:
+            ep_s = int(ep_offset[ep_idx])
+            ep_l = int(ep_len[ep_idx])
+            if ep_s == chunk_end and (chunk_end - chunk_start + ep_l) <= read_chunk_size:
+                members.append((ep_idx, chunk_end - chunk_start, ep_l))
+                chunk_end = ep_s + ep_l
+            else:
+                encode_chunk(chunk_start, chunk_end, members)
+                encode_pbar.update(len(members))
+                chunk_start = ep_s
+                chunk_end = ep_s + ep_l
+                members = [(ep_idx, 0, ep_l)]
+        encode_chunk(chunk_start, chunk_end, members)
+        encode_pbar.update(len(members))
+        encode_pbar.close()
+
+        # ---------- Pass 2: aligned window assembly + predictor forward ----------
+
+        all_z_parts = []
+        all_state_parts = []
+
+        pbar = tqdm(total=n_pairs, desc="predicting z (aligned)", unit="pair")
+        for ep_idx, n_windows_ep in selected:
+            z_cache = ep_z[ep_idx]         # (n_output, D)  output-step
+            states = ep_state[ep_idx]      # (n_output, state_dim)  output-step
+            actions = ep_action[ep_idx]    # (raw_len, 2)  raw-frame
+
+            z_cache_t = torch.from_numpy(z_cache).to(device_t)
+
+            # Batch over window starts t in output-step units.
+            for w_start in range(0, n_windows_ep, batch_size):
+                w_end = min(w_start + batch_size, n_windows_ep)
+                B = w_end - w_start
+                t_idx = np.arange(w_start, w_end)          # (B,) output-step start indices
+
+                # Context z: (B, ctx_len, D)
+                ctx_idx = torch.from_numpy(
+                    np.stack([t_idx + i for i in range(ctx_len)], axis=1)
+                ).to(device_t)
+                ctx_z = z_cache_t[ctx_idx]
+
+                # Per-position actions: for each window, for each ctx position i,
+                # take raw actions[(t+i)*fs : (t+i+1)*fs] (z-score per raw-action
+                # dim if normalize_actions, else raw), then flatten to (fs*act_dim,).
+                act_dim = actions.shape[1]
+                actions_batch = np.zeros((B, ctx_len, fs * act_dim), dtype=np.float32)
+                for bi, t in enumerate(t_idx):
+                    for i in range(ctx_len):
+                        a_s = int((t + i) * fs)
+                        a_e = min(a_s + fs, len(actions))
+                        raw = actions[a_s:a_e]
+                        if len(raw) < fs:
+                            raw = np.concatenate(
+                                [raw, np.zeros((fs - len(raw), act_dim), dtype=np.float32)]
+                            )
+                        if act_mean is not None:
+                            raw = (raw - act_mean) / act_std
+                        actions_batch[bi, i] = raw.flatten()
+
+                # State targets: (B, ctx_len, state_dim), at output-step t+n_preds+i.
+                state_targets = np.stack(
+                    [states[t_idx + n_preds + i] for i in range(ctx_len)], axis=1
+                )
+
+                act_t = torch.from_numpy(actions_batch).to(device_t, non_blocking=True)
+                with torch.no_grad():
+                    act_emb = model.action_encoder(act_t)      # (B, ctx_len, A_emb)
+                    pred = model.predict(ctx_z, act_emb)        # (B, ctx_len, D)
+
+                # Flatten (B, ctx_len, ...) -> (B*ctx_len, ...) to emit all pairs.
+                all_z_parts.append(pred.reshape(-1, pred.shape[-1]).cpu().numpy())
+                all_state_parts.append(state_targets.reshape(-1, state_targets.shape[-1]))
+                pbar.update(B * emit_per_window)
+        pbar.close()
+
+        all_z = np.concatenate(all_z_parts, axis=0)[:n_pairs]
+        all_state = np.concatenate(all_state_parts, axis=0)[:n_pairs]
+
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    np.savez(output_path, z=all_z, state=all_state)
+    print(f"Saved {n_pairs} aligned predicted z's to {output_path}")
+    print(f"  z: {all_z.shape}, state: {all_state.shape}")
+
+
 def resolve_max_frames(datasets, max_frames, max_frames_per_dataset, cache_dir):
     """Return per-dataset max_frames list.
 
@@ -326,6 +641,29 @@ def main():
                         help="Use linear probe instead of MLP")
     parser.add_argument("--predicted-z", action="store_true",
                         help="Train on predictor z's (action-conditioned) instead of encoder z's")
+    parser.add_argument("--training-aligned", action="store_true",
+                        help="Use training-aligned predicted-z pipeline (mirrors train.py aux-loss "
+                             "windowing: real per-position actions, all ctx_len output positions). "
+                             "Implies --predicted-z. Writes to a separate cache file so it does not "
+                             "overwrite legacy predicted_z.npz.")
+    parser.add_argument("--ctx-len", type=int, default=3,
+                        help="history_size / context length (must match training config).")
+    parser.add_argument("--n-preds", type=int, default=1,
+                        help="num_preds / prediction horizon (must match training config). "
+                             "Default 1. Pass 2 for v2-style multi-step-target checkpoints.")
+    parser.add_argument("--normalize-actions", action=argparse.BooleanOptionalAction,
+                        default=True,
+                        help="Apply z-score normalizer to actions before action_encoder. "
+                             "Default ON. Pass --no-normalize-actions for broken-regime "
+                             "multi-dataset checkpoints (pre ConcatDataset transform-"
+                             "propagation fix; see e5-05).")
+    parser.add_argument("--action-norm-ref", default="lunarlander_synthetic_heuristic_clean",
+                        help="Reference dataset for reproducing training's action normalizer "
+                             "(must be the FIRST dataset in the training config's data.dataset.name "
+                             "list). Only consulted when --normalize-actions is set.")
+    parser.add_argument("--z-dims", default=None,
+                        help="Slice of z to feed probe, as START:END (e.g. '0:16' for dedicated z_kin). "
+                             "Default: use full z.")
     parser.add_argument("--device", default="cuda")
     args = parser.parse_args()
 
@@ -336,40 +674,76 @@ def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # --training-aligned implies --predicted-z. Cache filename encodes the mode,
+    # (ctx_len, n_preds), AND the normalize-actions setting so a config change
+    # never silently reuses a stale cache from a different pipeline or different
+    # action-input statistics.
+    if args.training_aligned and not args.predicted_z:
+        args.predicted_z = True
+    aligned = args.training_aligned
+    if aligned:
+        norm_tag = "Z" if args.normalize_actions else "Raw"
+        cache_stem = f"predicted_z_aligned_ctx{args.ctx_len}_np{args.n_preds}_norm{norm_tag}"
+        print(f"predicted_z mode: training_aligned ctx={args.ctx_len} np={args.n_preds} "
+              f"normalize_actions={args.normalize_actions}")
+    else:
+        cache_stem = "predicted_z"
+        if args.predicted_z:
+            print("predicted_z mode: legacy_broadcast (single-position output, "
+                  "action broadcast across history)")
+            if args.normalize_actions:
+                print("  WARNING: --normalize-actions has no effect in legacy mode.")
+
     if args.predicted_z:
-        # Predicted-z mode: use predictor(z_history, action) → z_{t+1}
-        z_cache = output_dir / "predicted_z.npz"
+        # Predicted-z mode: use predictor(z_history, action) → z_{t+k}
+        z_cache = output_dir / f"{cache_stem}.npz"
         if z_cache.exists():
             print(f"Loading cached predicted embeddings from {z_cache}")
             data = np.load(z_cache)
             z_all, state_all = data["z"], data["state"]
         else:
-            # For predicted-z, max_frames applies to total transitions
+            # For predicted-z, max_frames applies to total emitted pairs.
             total_limit = args.max_frames if args.max_frames is not None else 0
             if args.max_frames_per_dataset is not None:
                 total_limit = args.max_frames_per_dataset * len(datasets)
             z_parts, state_parts = [], []
             for ds_name in datasets:
-                ds_cache = output_dir / f"predicted_z_{ds_name}.npz"
+                ds_cache = output_dir / f"{cache_stem}_{ds_name}.npz"
                 ds_limit = total_limit // len(datasets) if total_limit > 0 else 0
                 if ds_cache.exists():
                     print(f"\n--- Reusing cached predicted z for {ds_name}: {ds_cache.name} ---")
                 else:
                     print(f"\n--- Predicting z for {ds_name} (max_frames={ds_limit or 'all'}) ---")
-                    encode_predicted(
-                        model_path=args.model,
-                        dataset_name=ds_name,
-                        cache_dir=args.cache_dir,
-                        output_path=str(ds_cache),
-                        device=args.device,
-                        batch_size=args.encode_batch_size,
-                        max_frames=ds_limit,
-                        read_chunk_size=args.read_chunk_size,
-                    )
+                    if aligned:
+                        encode_predicted_aligned(
+                            model_path=args.model,
+                            dataset_name=ds_name,
+                            cache_dir=args.cache_dir,
+                            output_path=str(ds_cache),
+                            ctx_len=args.ctx_len,
+                            n_preds=args.n_preds,
+                            normalize_actions=args.normalize_actions,
+                            action_norm_ref=args.action_norm_ref,
+                            device=args.device,
+                            batch_size=args.encode_batch_size,
+                            max_frames=ds_limit,
+                            read_chunk_size=args.read_chunk_size,
+                        )
+                    else:
+                        encode_predicted(
+                            model_path=args.model,
+                            dataset_name=ds_name,
+                            cache_dir=args.cache_dir,
+                            output_path=str(ds_cache),
+                            device=args.device,
+                            batch_size=args.encode_batch_size,
+                            max_frames=ds_limit,
+                            read_chunk_size=args.read_chunk_size,
+                        )
                 data = np.load(ds_cache)
                 z_parts.append(data["z"])
                 state_parts.append(data["state"])
-                print(f"  {ds_name}: {data['z'].shape[0]} transitions")
+                print(f"  {ds_name}: {data['z'].shape[0]} pairs")
             z_all = np.concatenate(z_parts, axis=0)
             state_all = np.concatenate(state_parts, axis=0)
             np.savez(z_cache, z=z_all, state=state_all)
@@ -409,6 +783,18 @@ def main():
             np.savez(z_cache, z=z_all, state=state_all)
             print(f"\nCombined: {z_all.shape[0]} frames from {len(datasets)} datasets -> {z_cache}")
 
+    # Optional z-slice (e.g. --z-dims 0:16 to probe the dedicated z_kin block only).
+    # Caches above store the full z; slicing happens here so switching slices does
+    # not trigger a re-encode.
+    z_slice = None
+    if args.z_dims is not None:
+        parts = args.z_dims.split(":")
+        if len(parts) != 2:
+            raise ValueError(f"--z-dims must be START:END, got {args.z_dims!r}")
+        z_slice = (int(parts[0]), int(parts[1]))
+        print(f"Slicing z to dims [{z_slice[0]}:{z_slice[1]}] (was {z_all.shape[1]}-dim)")
+        z_all = z_all[:, z_slice[0]:z_slice[1]]
+
     # Use first 6 dims only (kinematics)
     state_kin = state_all[:, :6]
 
@@ -438,9 +824,17 @@ def main():
     print(f"  {'mean':8s}: R² = {metrics['r2_mean']:.4f}")
     print(f"  val MSE: {metrics['val_mse']:.6f}")
 
-    # Step 4: Save
-    suffix = "_linear" if args.linear else ""
-    save_state_head(head, metrics, str(output_dir / f"state_head{suffix}.pt"))
+    # Step 4: Save. Suffix encodes norm mode in aligned runs so probes from
+    # different norm settings in the same output_dir don't overwrite each other.
+    suffix = ""
+    if aligned:
+        suffix += "_norm" + ("Z" if args.normalize_actions else "Raw")
+    if args.linear:
+        suffix += "_linear"
+    if z_slice is not None:
+        suffix += f"_z{z_slice[0]}-{z_slice[1]}"
+    save_state_head(head, metrics, str(output_dir / f"state_head{suffix}.pt"),
+                    z_slice=z_slice)
 
     # Save report as text
     ds_str = ", ".join(datasets)
@@ -449,7 +843,10 @@ def main():
         f.write(f"State Head R² Report ({probe_type})\n")
         f.write(f"Model: {args.model}\n")
         f.write(f"Datasets ({len(datasets)}): {ds_str}\n")
-        f.write(f"Frames: {n}\n\n")
+        f.write(f"Frames: {n}\n")
+        if z_slice is not None:
+            f.write(f"z-slice: [{z_slice[0]}:{z_slice[1]}]\n")
+        f.write("\n")
         for name in KIN_DIM_NAMES:
             f.write(f"  {name:8s}: R² = {metrics['r2_per_dim'][name]:.4f}\n")
         f.write(f"\n  mean R²: {metrics['r2_mean']:.4f}\n")
