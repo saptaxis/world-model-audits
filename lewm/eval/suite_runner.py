@@ -44,7 +44,7 @@ def infer_config_from_run_dir(run_dir) -> dict:
 
 
 CLUSTERS = {
-    "A": ["encoder_z_probe"],
+    "A": ["encoder_z_probe", "predicted_z_probe"],
     "B": ["test_9_predictor_modification", "test_10_offline_predloss", "test_11_encoder_forward_coherence"],
     "C": ["test_1_raw_zdiff", "test_7_fresh_state_head_action_response",
           "test_8_in_model_aux_head_action_response"],
@@ -54,6 +54,7 @@ CLUSTERS = {
 
 TEST_ARTIFACTS = {
     "encoder_z_probe":               ("encoder_z/r2_report.json", None),
+    "predicted_z_probe":             ("predicted_z/r2_report_normZ.json", None),
     "test_1_raw_zdiff":              ("action_response/action_response_report_normZ.json", None),
     "test_7_fresh_state_head_action_response":
                                      ("action_response/action_response_report_normZ.json", None),
@@ -89,6 +90,49 @@ class EvalTarget:
                 f"No checkpoint matching *_epoch_{self.epoch}_object.ckpt in {self.run_dir}"
             )
         return matches[0]
+
+
+def load_all_available_results(target: EvalTarget) -> dict:
+    """Scan <epoch_dir>/ and load every test result present on disk.
+
+    Independent of --selected. Always returns a flat dict {test_name: result_dict}
+    containing whatever's available. Missing tests are absent from the dict.
+
+    Test 5 (cross-network state-head) may have multiple instances (one per
+    reference-tag); when >1 is found, the entry is a dict {tag: result_dict}
+    rather than a single result.
+    """
+    results: dict = {}
+    epoch_dir = target.epoch_dir()
+
+    # Flat files with one or more test keys in their results.
+    files_to_try = [
+        epoch_dir / "encoder_z" / "r2_report.json",
+        epoch_dir / "predicted_z" / "r2_report_normZ.json",
+        epoch_dir / "action_response" / "action_response_report_normZ.json",
+        epoch_dir / "rollout_fidelity" / "rollout_fidelity.json",
+    ]
+    for path in files_to_try:
+        if path.exists():
+            data = json.loads(path.read_text())
+            for test_name, test_data in data.get("results", {}).items():
+                results[test_name] = test_data
+
+    # Test 5: glob every cross_head_<tag>/ (may be multiple reference-tags).
+    cross_head_by_tag: dict = {}
+    for dir in sorted(epoch_dir.glob("cross_head_*")):
+        json_path = dir / "cross_head.json"
+        if not json_path.exists():
+            continue
+        data = json.loads(json_path.read_text())
+        tag = dir.name.removeprefix("cross_head_")
+        t5 = data.get("results", {}).get("test_5_cross_network_state_head")
+        if t5 is not None:
+            cross_head_by_tag[tag] = t5
+    if cross_head_by_tag:
+        results["test_5_cross_network_state_head"] = cross_head_by_tag
+
+    return results
 
 
 def resolve_requested_tests(include_clusters, tests, skip_tests,
