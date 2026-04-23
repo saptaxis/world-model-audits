@@ -217,6 +217,26 @@ def _format_cluster_c(results: dict) -> list[str]:
             lines.append("")
             lines.append(f"  Read (T1): {v1}")
 
+            # Cross-reference T1 (counterfactual action swap) vs T9 (recorded
+            # action modification) to quantify how much of the predictor's
+            # modification magnitude is action-driven.
+            t9 = results.get("test_9_predictor_modification")
+            if t9 and t9.get("rel_norm", 0) > 1e-6:
+                share = max_rel / t9["rel_norm"]
+                lines.append(f"  Share of predictor magnitude that's action-driven:")
+                lines.append(f"    T1_max / T9 = {max_rel:.3f} / {t9['rel_norm']:.3f} = {share:.0%}")
+                if share >= 0.5:
+                    v_share = (f"most (~{share:.0%}) of the predictor's z-modification "
+                               "is action-conditioned. Action channel is doing the bulk "
+                               "of the predictive work.")
+                elif share >= 0.2:
+                    v_share = (f"partial (~{share:.0%}) of the predictor's modification "
+                               "is action-conditioned. History dynamics explain the rest.")
+                else:
+                    v_share = (f"minor (~{share:.0%}) of predictor modification is action-"
+                               "conditioned. Most z-change comes from history, not action.")
+                lines.append(f"  Read (T1 vs T9): {v_share}")
+
     if t7:
         lines.append("")
         lines.append("  T7 decoded Δ-state under action (fresh state_head):")
@@ -270,14 +290,32 @@ def _format_cluster_d(results: dict) -> list[str]:
         return lines
 
     if t2:
+        lines.append("  T2 action-magnitude sweep — per-magnitude decoded Δ-state:")
+        main_rows = t2.get("main", [])
+        side_rows = t2.get("side", [])
+        if main_rows:
+            lines.append("")
+            lines.append("    Main thrust sweep (side=0):")
+            lines.append(f"      {'mag':>5s}  {'Δvy':>10s}  {'Δy':>10s}")
+            for row in main_rows:
+                lines.append(f"      {row['mag']:>5.2f}  {row['dvy']:>+10.4f}  {row['dy']:>+10.4f}")
+        if side_rows:
+            lines.append("")
+            lines.append("    Side thrust sweep (main=0):")
+            lines.append(f"      {'mag':>5s}  {'Δang_vel':>10s}  {'Δx':>10s}")
+            for row in side_rows:
+                lines.append(f"      {row['mag']:>5.2f}  {row['dang_vel']:>+10.4f}  {row['dx']:>+10.4f}")
+
         lin = t2.get("linearity", {})
         main_r2 = lin.get("main_r2")
         side_r2 = lin.get("side_r2")
-        lines.append("  T2 action-magnitude sweep — linearity R² of Δ-state vs magnitude:")
-        if main_r2 is not None:
-            lines.append(f"    Main thrust → Δvy  R²     {main_r2:+.3f}")
-        if side_r2 is not None:
-            lines.append(f"    Side thrust → Δang_vel R² {side_r2:+.3f}")
+        if main_r2 is not None or side_r2 is not None:
+            lines.append("")
+            lines.append("    Linearity R² (Δ-state vs magnitude):")
+            if main_r2 is not None:
+                lines.append(f"      Main thrust → Δvy  R²     {main_r2:+.3f}")
+            if side_r2 is not None:
+                lines.append(f"      Side thrust → Δang_vel R² {side_r2:+.3f}")
 
         def _verdict(r2):
             if r2 > 0.9: return "physics-like (linear + monotone)"
