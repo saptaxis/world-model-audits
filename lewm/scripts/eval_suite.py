@@ -452,13 +452,6 @@ def main():
     state_head_path = probe_subdir / "state_head_normZ.pt"
 
     # Determine what needs to run
-    needs_action_response = any(t in selected for t in [
-        "test_1_raw_zdiff", "test_2_action_magnitude_sweep", "test_4_ood_actions",
-        "test_7_fresh_state_head_action_response",
-        "test_8_in_model_aux_head_action_response",
-        "test_9_predictor_modification", "test_10_offline_predloss",
-        "test_11_encoder_forward_coherence",
-    ])
     needs_rollout = "test_3_rollout_fidelity" in selected
     needs_encoder_z = "encoder_z_probe" in selected
     needs_predicted_z = "predicted_z_probe" in selected
@@ -474,13 +467,32 @@ def main():
                                  max_frames_per_dataset=frames_per_dataset,
                                  val_split=args.probe_val_split)
 
-    ar_json_exists = (target.epoch_dir() / "action_response" / "action_response_report_normZ.json").exists()
+    # Granular AR check: does the existing JSON already contain every AR-family
+    # test we want? If any selected AR test is missing from the file, re-run
+    # (test_action_response.py merges new results into the existing JSON, so
+    # B-keys from a prior run are preserved when C-keys are added now).
+    ar_json_path = target.epoch_dir() / "action_response" / "action_response_report_normZ.json"
+    ar_family = {t for t in selected if t in (
+        "test_1_raw_zdiff", "test_2_action_magnitude_sweep", "test_4_ood_actions",
+        "test_7_fresh_state_head_action_response",
+        "test_8_in_model_aux_head_action_response",
+        "test_9_predictor_modification", "test_10_offline_predloss",
+        "test_11_encoder_forward_coherence",
+    )}
+    existing_ar_keys: set[str] = set()
+    if ar_json_path.exists():
+        existing_ar_keys = set(json.loads(ar_json_path.read_text()).get("results", {}).keys())
+    missing_ar = ar_family - existing_ar_keys
+
     rf_json_exists = (target.epoch_dir() / "rollout_fidelity" / "rollout_fidelity.json").exists()
     pz_json_exists = (target.epoch_dir() / "predicted_z" / "r2_report_normZ.json").exists()
-    ar_needs_run = needs_action_response and not ar_json_exists
+    ar_needs_run = bool(missing_ar)
     rf_needs_run = needs_rollout and not rf_json_exists
     pz_needs_run = (needs_predicted_z and not pz_json_exists) or (
         (ar_needs_run or rf_needs_run) and not state_head_path.exists())
+
+    if ar_needs_run:
+        print(f"Action-response needs keys: {sorted(missing_ar)} (existing: {sorted(existing_ar_keys)})")
 
     if pz_needs_run:
         _run_predicted_z_probe(target, cache_dir,
@@ -490,7 +502,7 @@ def main():
     if ar_needs_run or rf_needs_run:
         if ar_needs_run:
             _run_action_response_group(target, cache_dir, state_head_path, probe_dataset,
-                                       tests_requested=set(selected))
+                                       tests_requested=missing_ar)
 
         if rf_needs_run:
             _run_rollout_fidelity(target, cache_dir, state_head_path,
