@@ -9,7 +9,7 @@ requires-python = ">=3.11"
 dependencies = []
 
 [tool.setuptools.packages.find]
-include = ["dreamerv3*"]
+include = ["dreamerv3*", "lewm*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
