@@ -115,12 +115,22 @@ def main():
                         "150k each. Same default works across networks.")
     p.add_argument("--probe-val-split", type=float, default=0.25,
                    help="Val split fraction for both probes. Default 0.25.")
+    p.add_argument("--output-base-dir", default=None,
+                   help="Override artifact location. Default: write under "
+                        "<run-dir>/epoch_<N>/. When set, writes under "
+                        "<output-base-dir>/epoch_<N>/ instead (useful for "
+                        "experimental runs that shouldn't pollute the canonical "
+                        "run_dir, or when run_dir is read-only).")
     args = p.parse_args()
 
     run_dir = Path(args.run_dir)
     cfg = infer_config_from_run_dir(run_dir)
-    target = EvalTarget(run_dir=run_dir, epoch=args.epoch, cfg=cfg)
+    output_base_dir = Path(args.output_base_dir) if args.output_base_dir else None
+    target = EvalTarget(run_dir=run_dir, epoch=args.epoch, cfg=cfg,
+                        output_base_dir=output_base_dir)
     target.epoch_dir().mkdir(parents=True, exist_ok=True)
+    if output_base_dir is not None:
+        print(f"Output base dir: {output_base_dir} (run_dir unchanged)")
 
     selected = resolve_requested_tests(args.include_clusters, args.tests, args.skip_tests)
     print(f"Selected tests: {selected}")
