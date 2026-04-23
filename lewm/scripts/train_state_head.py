@@ -76,6 +76,15 @@ Future post-fix multi-dataset network (any num_preds, any kin_block):
         --normalize-actions \\
         [--z-dims 0:<kin_block>] \\
         --max-frames-per-dataset 75000 --val-split 0.25
+
+Encoder-z probe (Cluster A of e5-jepa-eval-suite, Q1):
+    python lewm/scripts/train_state_head.py \\
+        --model /.../lewm_..._object.ckpt \\
+        --dataset <list> \\
+        --output-dir /.../state_head_<ep>_ENCODER \\
+        --max-frames-per-dataset 75000 --val-split 0.25
+    # NO --predicted-z, NO --training-aligned, NO --normalize-actions.
+    # Encodes each frame individually; per-frame state-decodability only.
 """
 
 import argparse
@@ -870,6 +879,28 @@ def main():
         f.write(f"\n  mean R²: {metrics['r2_mean']:.4f}\n")
         f.write(f"  val MSE: {metrics['val_mse']:.6f}\n")
     print(f"Report saved to {report_path}")
+
+    # Save report as JSON (sibling of text report, consumed by eval_suite.py)
+    from lewm.eval.report_json import write_json_report, metadata_from_args
+    test_key = "predicted_z_probe" if args.predicted_z else "encoder_z_probe"
+    per_dim_r2 = {name: float(metrics["r2_per_dim"][name]) for name in KIN_DIM_NAMES}
+    write_json_report(
+        out_dir=output_dir,
+        basename=f"r2_report{suffix}",
+        results_dict={
+            test_key: {
+                "mean_r2": float(metrics["r2_mean"]),
+                "per_dim_r2": per_dim_r2,
+                "val_mse_raw_state": float(metrics["val_mse"]),
+            }
+        },
+        metadata=metadata_from_args(args, extra={
+            "predicted_z": args.predicted_z,
+            "training_aligned": args.training_aligned,
+            "z_dims": args.z_dims,
+            "linear": args.linear,
+        }),
+    )
 
 
 if __name__ == "__main__":
