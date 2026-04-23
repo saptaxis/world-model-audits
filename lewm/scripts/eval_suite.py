@@ -251,6 +251,24 @@ def _format_cluster_c(results: dict) -> list[str]:
         for k, v in t7.items():
             if isinstance(v, (int, float)):
                 lines.append(f"    {k:<30s} {v:+.4f}")
+        # Side-symmetry sanity check: physics requires side_left to give
+        # opposite-sign Δang_vel from side_right (they fire opposite engines).
+        sr = t7.get("side_right_dang_vel")
+        sl = t7.get("side_left_dang_vel")
+        if sr is not None and sl is not None:
+            if sr * sl < 0 and abs(sr) > 0.01 and abs(sl) > 0.01:
+                sym_verdict = ("side_right and side_left produce opposite-sign Δang_vel "
+                               "(physics-consistent symmetry).")
+            elif sr * sl >= 0 and abs(sr) > 0.05:
+                sym_verdict = ("side_right and side_left produce SAME-sign Δang_vel — "
+                               "predictor is coding side-thrust by magnitude only, not "
+                               "by direction. Non-physical (no symmetry).")
+            elif abs(sl) < 0.01 and abs(sr) > 0.05:
+                sym_verdict = ("side_left Δang_vel near zero while side_right is substantial — "
+                               "asymmetric response; side-left under-learned.")
+            else:
+                sym_verdict = "side-symmetry ambiguous (effects small)."
+            lines.append(f"  Read (T7 side symmetry): {sym_verdict}")
 
     if t8:
         lines.append("")
@@ -422,8 +440,8 @@ def _format_cluster_d(results: dict) -> list[str]:
                       "state change.")
             elif max_z >= 0.3 and max_decoded_abs >= 0.05:
                 v4 = ("OOD actions move z substantially AND produce decoded kinematic effects. "
-                      "Predictor generalizes — worth checking whether decoded deltas scale "
-                      "sensibly (e.g., reverse_main → negative Δvy).")
+                      "Treat this as an EXTRAPOLATION diagnostic, not a success metric — "
+                      "check signs below.")
             elif max_z < 0.05:
                 v4 = ("OOD actions barely move z — predictor may be saturating / collapsing "
                       "on inputs outside the training distribution.")
@@ -431,6 +449,26 @@ def _format_cluster_d(results: dict) -> list[str]:
                 v4 = ("OOD response moderate in both z and decoded state — no strong verdict.")
             lines.append("")
             lines.append(f"  Read (T4): {v4}")
+
+            # Sign-check: reverse_main = [-1, 0] should give NEGATIVE Δvy if
+            # the predictor has learned that main-thrust sign is physical.
+            # Positive Δvy means the predictor is coding |main| (magnitude-
+            # only), not direction. Non-physical.
+            rev = next((item for item in t4.get("ood_actions", [])
+                        if item.get("name") == "reverse_main"), None)
+            if rev:
+                dvy = rev.get("decoded_dstate", {}).get("vy")
+                if dvy is not None:
+                    if dvy < -0.02:
+                        sign_verdict = (f"reverse_main Δvy = {dvy:+.4f} (negative) — "
+                                        "predictor treats main thrust as signed (physics-consistent).")
+                    elif dvy > 0.02:
+                        sign_verdict = (f"reverse_main Δvy = {dvy:+.4f} (POSITIVE) — "
+                                        "predictor is coding |main| as thrust magnitude, "
+                                        "ignoring sign. Non-compositional / non-physical.")
+                    else:
+                        sign_verdict = f"reverse_main Δvy = {dvy:+.4f} (≈0) — ambiguous."
+                    lines.append(f"  Read (T4 sign-check): {sign_verdict}")
     lines.append("")
     return lines
 
@@ -602,11 +640,21 @@ def _format_coverage_and_classification(results: dict) -> list[str]:
             q4_bits.append(f"T2-side {side_verdict} (R² {side_r2:+.2f}, max |Δang_vel| {side_max:.3f})")
     if t3:
         per_ds = results["test_3_rollout_fidelity"].get("per_dataset", {})
-        growths = [v.get("mse_at_20", 0) / max(v.get("mse_at_5", 1e-9), 1e-9) for v in per_ds.values()]
-        n_scen = len(per_ds)
+        # Only include scenarios that actually ran with non-zero mse_at_5
+        # (skipped scenarios and exact-zero baselines would skew the average).
+        growths = []
+        for v in per_ds.values():
+            if v.get("skipped"):
+                continue
+            m5 = v.get("mse_at_5")
+            m20 = v.get("mse_at_20")
+            if m5 and m5 > 0 and m20 is not None:
+                growths.append(m20 / m5)
+        n_scen_total = len(per_ds)
+        n_scen_used = len(growths)
         if growths:
-            q4_bits.append(f"T3 rollout growth {sum(growths)/len(growths):.1f}× "
-                           f"over {n_scen}/4 scenarios")
+            q4_bits.append(f"T3 rollout growth {sum(growths)/n_scen_used:.1f}× "
+                           f"over {n_scen_used}/{n_scen_total} scenarios")
     if q4_bits:
         q4 = "partial — " + "; ".join(q4_bits)
     else:
