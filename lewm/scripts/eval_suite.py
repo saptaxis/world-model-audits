@@ -393,17 +393,41 @@ def _format_cluster_d(results: dict) -> list[str]:
         lines.append("")
         lines.append("  T4 OOD-action response (z-norm + decoded Δ-state):")
         lines.append(f"    {'name':<22s} {'‖Δz‖/‖z‖':>10s}  {'Δvy':>8s}  {'Δang_vel':>9s}  {'Δx':>8s}  {'Δy':>8s}")
+        zdiffs = []
+        max_decoded_abs = 0.0
         for item in t4.get("ood_actions", []):
             name = item.get("name", "?")
             rel = item.get("rel_norm_zdiff")
             d = item.get("decoded_dstate", {})
             if rel is None:
                 continue
+            zdiffs.append(rel)
+            for v in d.values():
+                if isinstance(v, (int, float)):
+                    max_decoded_abs = max(max_decoded_abs, abs(v))
             lines.append(
                 f"    {name:<22s} {rel:>10.3f}  "
                 f"{d.get('vy', 0):>+8.4f}  {d.get('ang_vel', 0):>+9.4f}  "
                 f"{d.get('x', 0):>+8.4f}  {d.get('y', 0):>+8.4f}"
             )
+        if zdiffs:
+            max_z = max(zdiffs)
+            if max_z >= 0.3 and max_decoded_abs < 0.05:
+                v4 = ("OOD actions produce large z-movement but decoded kinematic effects "
+                      "remain small. OOD response is NOT clearly physics-like — the predictor "
+                      "reacts to OOD input in z-space but doesn't translate it into coherent "
+                      "state change.")
+            elif max_z >= 0.3 and max_decoded_abs >= 0.05:
+                v4 = ("OOD actions move z substantially AND produce decoded kinematic effects. "
+                      "Predictor generalizes — worth checking whether decoded deltas scale "
+                      "sensibly (e.g., reverse_main → negative Δvy).")
+            elif max_z < 0.05:
+                v4 = ("OOD actions barely move z — predictor may be saturating / collapsing "
+                      "on inputs outside the training distribution.")
+            else:
+                v4 = ("OOD response moderate in both z and decoded state — no strong verdict.")
+            lines.append("")
+            lines.append(f"  Read (T4): {v4}")
     lines.append("")
     return lines
 
@@ -544,14 +568,14 @@ def _format_coverage_and_classification(results: dict) -> list[str]:
         t7_max = max(abs(v) for v in results["test_7_fresh_state_head_action_response"].values()
                      if isinstance(v, (int, float)))
         if t1_max >= 0.3 and t7_max >= 0.05:
-            q3 = f"✓ yes — T1 {t1_max:.2f} in z + T7 {t7_max:.3f} decoded"
+            q3 = f"✓ yes in z-space AND decoded kinematics — T1 {t1_max:.2f}, T7 {t7_max:.3f}"
         elif t1_max >= 0.3 and t7_max < 0.05:
-            q3 = (f"partial — T1 {t1_max:.2f} (strong in z) but T7 {t7_max:.3f} "
-                  "(weak in decoded state)")
+            q3 = (f"yes in z-space, weak in decoded kinematics — T1 {t1_max:.2f} "
+                  f"(strong in z) but T7 {t7_max:.3f} (decoded effect small)")
         elif t1_max < 0.05:
-            q3 = f"✗ no — T1 {t1_max:.2f} (action-inert in z)"
+            q3 = f"✗ no — action-inert in z (T1 {t1_max:.2f})"
         else:
-            q3 = f"weak — T1 {t1_max:.2f}"
+            q3 = f"weak overall — T1 {t1_max:.2f}"
     else:
         q3 = "? — Cluster C not fully populated"
     lines.append(f"  Q3 action-pathway:                  {q3}")
@@ -561,15 +585,25 @@ def _format_coverage_and_classification(results: dict) -> list[str]:
     if t2:
         lin = results["test_2_action_magnitude_sweep"].get("linearity", {})
         main_r2 = lin.get("main_r2")
+        side_r2 = lin.get("side_r2")
+        main_max = max((abs(r.get("dvy", 0)) for r in
+                        results["test_2_action_magnitude_sweep"].get("main", [])), default=0)
+        side_max = max((abs(r.get("dang_vel", 0)) for r in
+                        results["test_2_action_magnitude_sweep"].get("side", [])), default=0)
         if main_r2 is not None:
-            main_max = max((abs(r.get("dvy", 0)) for r in
-                            results["test_2_action_magnitude_sweep"].get("main", [])), default=0)
-            q4_bits.append(f"T2-main R² {main_r2:+.2f} (max |Δvy| {main_max:.3f})")
+            main_verdict = "linear" if main_r2 > 0.9 else "nonlinear" if main_r2 > 0.5 else "non-physics-like"
+            q4_bits.append(f"T2-main {main_verdict} (R² {main_r2:+.2f}, max |Δvy| {main_max:.3f})")
+        if side_r2 is not None:
+            side_verdict = "linear" if side_r2 > 0.9 else "nonlinear" if side_r2 > 0.5 else (
+                "non-physics-like" if side_r2 >= 0 else "non-monotone")
+            q4_bits.append(f"T2-side {side_verdict} (R² {side_r2:+.2f}, max |Δang_vel| {side_max:.3f})")
     if t3:
         per_ds = results["test_3_rollout_fidelity"].get("per_dataset", {})
         growths = [v.get("mse_at_20", 0) / max(v.get("mse_at_5", 1e-9), 1e-9) for v in per_ds.values()]
+        n_scen = len(per_ds)
         if growths:
-            q4_bits.append(f"T3 rollout growth {sum(growths)/len(growths):.1f}×")
+            q4_bits.append(f"T3 rollout growth {sum(growths)/len(growths):.1f}× "
+                           f"over {n_scen}/4 scenarios")
     if q4_bits:
         q4 = "partial — " + "; ".join(q4_bits)
     else:
@@ -581,9 +615,22 @@ def _format_coverage_and_classification(results: dict) -> list[str]:
     label_parts = []
     if "✓ yes" in q1: label_parts.append("encoder carries state info")
     if "✓ yes" in q2: label_parts.append("predictor beats identity")
-    if "partial" in q3: label_parts.append("action matters in z but weakly in decoded state")
-    elif "✓ yes" in q3: label_parts.append("action-conditioned in both z and decoded state")
-    elif "✗ no" in q3: label_parts.append("action-inert")
+    if "yes in z-space, weak in decoded" in q3:
+        label_parts.append("action signal in z but weakly kinematic")
+    elif "✓ yes" in q3:
+        label_parts.append("action-conditioned in z and decoded state")
+    elif "✗ no" in q3:
+        label_parts.append("action-inert")
+    if t2:
+        lin = results["test_2_action_magnitude_sweep"].get("linearity", {})
+        main_r2 = lin.get("main_r2", 0)
+        side_r2 = lin.get("side_r2", 0)
+        if main_r2 > 0.9 and side_r2 < 0.5:
+            label_parts.append("main-thrust linear but side-thrust not physics-like")
+        elif main_r2 > 0.9 and side_r2 > 0.9:
+            label_parts.append("both thrust axes linear")
+        elif main_r2 < 0.5 and side_r2 < 0.5:
+            label_parts.append("neither thrust axis physics-like")
     if label_parts:
         lines.append(f"  Provisional label: {'; '.join(label_parts)}.")
     lines.append("")
@@ -601,8 +648,8 @@ def format_report(target) -> tuple[str, dict]:
     Returns (text, results_dict). The text is the human-readable report; the
     dict is the aggregated results suitable for the combined JSON sibling.
     """
-    results = load_all_available_results(target)
-    lines = [
+    results, metadata = load_all_available_results(target)
+    header_lines = [
         "=" * 70,
         "E5 JEPA Eval Suite Report",
         "=" * 70,
@@ -610,8 +657,20 @@ def format_report(target) -> tuple[str, dict]:
         f"Epoch: {target.epoch}",
         f"Config: ctx_len={target.cfg['ctx_len']}, n_preds={target.cfg['n_preds']}, "
         f"kin_block={target.cfg['kin_block']}, action_norm_ref={target.cfg['action_norm_ref']}",
-        "",
     ]
+    norm = metadata.get("normalize_actions")
+    if norm is not None:
+        header_lines.append(f"Actions normalized: {norm}")
+    sample_bits = []
+    if metadata.get("ar_n_frames") is not None:
+        sample_bits.append(f"T1/T2/T4/T7-T11 N={metadata['ar_n_frames']} transitions")
+    if metadata.get("rollout_n_episodes") is not None:
+        sl = metadata.get("rollout_seq_len", "?")
+        sample_bits.append(f"T3 N={metadata['rollout_n_episodes']} episodes × {sl} steps")
+    if sample_bits:
+        header_lines.append(f"Sample sizes: {'; '.join(sample_bits)}")
+    header_lines.append("")
+    lines = header_lines
     lines.extend(_format_cluster_a(results))
     lines.extend(_format_cluster_b(results))
     lines.extend(_format_cluster_c(results))
