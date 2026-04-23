@@ -107,6 +107,14 @@ def main():
     p.add_argument("--reference-tag", default="ref",
                    help="Short name for the reference-head source (used as subdir suffix).")
     p.add_argument("--device", default="cuda")
+    p.add_argument("--probe-max-total-frames", type=int, default=900000,
+                   help="Total frame budget across all datasets for encoder-z and "
+                        "predicted-z probes. Divided evenly (floor) across datasets "
+                        "at dispatch. Default 900000 — matches heur-only's single-"
+                        "dataset baseline and gives all-clean runs (e.g. 6 datasets) "
+                        "150k each. Same default works across networks.")
+    p.add_argument("--probe-val-split", type=float, default=0.25,
+                   help="Val split fraction for both probes. Default 0.25.")
     args = p.parse_args()
 
     run_dir = Path(args.run_dir)
@@ -136,9 +144,15 @@ def main():
     needs_encoder_z = "encoder_z_probe" in selected
     needs_cross_head = "test_5_cross_network_state_head" in selected
 
+    frames_per_dataset = args.probe_max_total_frames // max(1, len(cfg["datasets"]))
+    print(f"Probe budget: {args.probe_max_total_frames} total / "
+          f"{len(cfg['datasets'])} datasets = {frames_per_dataset} frames each")
+
     if needs_encoder_z:
         if not (target.epoch_dir() / "encoder_z" / "r2_report.json").exists():
-            _run_encoder_z_probe(target, cache_dir)
+            _run_encoder_z_probe(target, cache_dir,
+                                 max_frames_per_dataset=frames_per_dataset,
+                                 val_split=args.probe_val_split)
 
     ar_json_exists = (target.epoch_dir() / "action_response" / "action_response_report_normZ.json").exists()
     rf_json_exists = (target.epoch_dir() / "rollout_fidelity" / "rollout_fidelity.json").exists()
@@ -147,7 +161,9 @@ def main():
 
     if ar_needs_run or rf_needs_run:
         if not state_head_path.exists():
-            _run_predicted_z_probe(target, cache_dir)
+            _run_predicted_z_probe(target, cache_dir,
+                                   max_frames_per_dataset=frames_per_dataset,
+                                   val_split=args.probe_val_split)
 
         if ar_needs_run:
             _run_action_response_group(target, cache_dir, state_head_path, probe_dataset,
