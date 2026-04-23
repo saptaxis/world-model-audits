@@ -610,29 +610,43 @@ def main():
         test2_results = {"main": [], "side": [], "linearity": {}}
 
         no_action_decoded = decoded["no_action"]
-        print(f"  Main thrust sweep (side=0):")
-        print(f"  {'mag':>5s}  {'Δvy':>10s}  {'Δy':>10s}")
+
+        def _mean_sem(arr):
+            """Return (mean, SEM) where SEM = std / sqrt(N). SEM is the
+            uncertainty on the mean; if |mean| < 2*SEM the mean is not
+            reliably distinguishable from zero."""
+            n = arr.shape[0]
+            return float(arr.mean()), float(arr.std(ddof=1) / np.sqrt(max(n, 1)))
+
+        print(f"  Main thrust sweep (side=0):  N={no_action_decoded.shape[0]} transitions")
+        print(f"  {'mag':>5s}  {'Δvy ± SEM':>20s}  {'Δy ± SEM':>20s}")
         for mag in sweep_mags:
             z_next = predict_one_step(model, z_history, [mag, 0.0],
                                       args.frameskip, device,
                                       act_mean=act_mean, act_std=act_std)
             dec = decode(z_next)
-            dvy = float((dec[:, 3] - no_action_decoded[:, 3]).mean())
-            dy = float((dec[:, 1] - no_action_decoded[:, 1]).mean())
-            test2_results["main"].append({"mag": mag, "dvy": dvy, "dy": dy})
-            print(f"  {mag:>5.2f}  {dvy:>+10.4f}  {dy:>+10.4f}")
+            dvy_mean, dvy_sem = _mean_sem(dec[:, 3] - no_action_decoded[:, 3])
+            dy_mean, dy_sem = _mean_sem(dec[:, 1] - no_action_decoded[:, 1])
+            test2_results["main"].append({"mag": mag,
+                                           "dvy": dvy_mean, "dvy_sem": dvy_sem,
+                                           "dy": dy_mean, "dy_sem": dy_sem})
+            print(f"  {mag:>5.2f}  {dvy_mean:>+10.4f} ± {dvy_sem:>7.4f}  "
+                  f"{dy_mean:>+10.4f} ± {dy_sem:>7.4f}")
 
         print(f"\n  Side thrust sweep (main=0):")
-        print(f"  {'mag':>5s}  {'Δang_vel':>10s}  {'Δx':>10s}")
+        print(f"  {'mag':>5s}  {'Δang_vel ± SEM':>20s}  {'Δx ± SEM':>20s}")
         for mag in sweep_mags:
             z_next = predict_one_step(model, z_history, [0.0, mag],
                                       args.frameskip, device,
                                       act_mean=act_mean, act_std=act_std)
             dec = decode(z_next)
-            dang = float((dec[:, 5] - no_action_decoded[:, 5]).mean())
-            dx = float((dec[:, 0] - no_action_decoded[:, 0]).mean())
-            test2_results["side"].append({"mag": mag, "dang_vel": dang, "dx": dx})
-            print(f"  {mag:>5.2f}  {dang:>+10.4f}  {dx:>+10.4f}")
+            dang_mean, dang_sem = _mean_sem(dec[:, 5] - no_action_decoded[:, 5])
+            dx_mean, dx_sem = _mean_sem(dec[:, 0] - no_action_decoded[:, 0])
+            test2_results["side"].append({"mag": mag,
+                                           "dang_vel": dang_mean, "dang_vel_sem": dang_sem,
+                                           "dx": dx_mean, "dx_sem": dx_sem})
+            print(f"  {mag:>5.2f}  {dang_mean:>+10.4f} ± {dang_sem:>7.4f}  "
+                  f"{dx_mean:>+10.4f} ± {dx_sem:>7.4f}")
 
         m_mags = np.array([r["mag"] for r in test2_results["main"]])
         m_dvy = np.array([r["dvy"] for r in test2_results["main"]])

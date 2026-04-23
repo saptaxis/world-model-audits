@@ -293,18 +293,33 @@ def _format_cluster_d(results: dict) -> list[str]:
         lines.append("  T2 action-magnitude sweep — per-magnitude decoded Δ-state:")
         main_rows = t2.get("main", [])
         side_rows = t2.get("side", [])
+        def _cell(mean, sem):
+            """Format as 'mean ± sem' when sem is available, else just mean.
+            A trailing '*' marks rows where |mean| < 2*sem (not distinguishable
+            from zero at 2σ)."""
+            if sem is None:
+                return f"{mean:>+10.4f}            "
+            sig = "" if abs(mean) >= 2 * sem else " *"
+            return f"{mean:>+10.4f} ± {sem:>7.4f}{sig}"
+
         if main_rows:
             lines.append("")
             lines.append("    Main thrust sweep (side=0):")
-            lines.append(f"      {'mag':>5s}  {'Δvy':>10s}  {'Δy':>10s}")
+            lines.append(f"      {'mag':>5s}  {'Δvy ± SEM':>21s}  {'Δy ± SEM':>21s}")
             for row in main_rows:
-                lines.append(f"      {row['mag']:>5.2f}  {row['dvy']:>+10.4f}  {row['dy']:>+10.4f}")
+                lines.append(f"      {row['mag']:>5.2f}  "
+                             f"{_cell(row['dvy'], row.get('dvy_sem'))}  "
+                             f"{_cell(row['dy'], row.get('dy_sem'))}")
         if side_rows:
             lines.append("")
             lines.append("    Side thrust sweep (main=0):")
-            lines.append(f"      {'mag':>5s}  {'Δang_vel':>10s}  {'Δx':>10s}")
+            lines.append(f"      {'mag':>5s}  {'Δang_vel ± SEM':>21s}  {'Δx ± SEM':>21s}")
             for row in side_rows:
-                lines.append(f"      {row['mag']:>5.2f}  {row['dang_vel']:>+10.4f}  {row['dx']:>+10.4f}")
+                lines.append(f"      {row['mag']:>5.2f}  "
+                             f"{_cell(row['dang_vel'], row.get('dang_vel_sem'))}  "
+                             f"{_cell(row['dx'], row.get('dx_sem'))}")
+        if main_rows or side_rows:
+            lines.append("    (* = |mean| < 2·SEM, not distinguishable from zero at 2σ)")
 
         lin = t2.get("linearity", {})
         main_r2 = lin.get("main_r2")
