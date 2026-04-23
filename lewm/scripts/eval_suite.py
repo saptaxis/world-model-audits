@@ -479,6 +479,12 @@ def main():
                    help="When Cluster D runs, write schematic-trajectory MP4s for "
                         "the first min(N, n_episodes) rollouts per scenario. "
                         "Default 10. Set 0 to disable.")
+    p.add_argument("--force", action="store_true",
+                   help="Ignore cached JSONs for the selected scope and re-run "
+                        "every selected test from scratch. Other tests' cached "
+                        "JSONs are preserved (AR merge-at-write rules still "
+                        "apply for unaffected keys). Useful after changing the "
+                        "underlying script (new metric fields, format fixes, etc).")
     args = p.parse_args()
 
     run_dir = Path(args.run_dir)
@@ -515,7 +521,7 @@ def main():
           f"{len(cfg['datasets'])} datasets = {frames_per_dataset} frames each")
 
     if needs_encoder_z:
-        if not (target.epoch_dir() / "encoder_z" / "r2_report.json").exists():
+        if args.force or not (target.epoch_dir() / "encoder_z" / "r2_report.json").exists():
             _run_encoder_z_probe(target, cache_dir,
                                  max_frames_per_dataset=frames_per_dataset,
                                  val_split=args.probe_val_split)
@@ -533,7 +539,7 @@ def main():
         "test_11_encoder_forward_coherence",
     )}
     existing_ar_keys: set[str] = set()
-    if ar_json_path.exists():
+    if ar_json_path.exists() and not args.force:
         existing_ar_keys = set(json.loads(ar_json_path.read_text()).get("results", {}).keys())
     missing_ar = ar_family - existing_ar_keys
 
@@ -541,13 +547,15 @@ def main():
     pz_json_exists = (target.epoch_dir() / "predicted_z" / "r2_report_normZ.json").exists()
     ar_needs_run = bool(missing_ar)
     # Rollout re-runs if JSON missing, OR if videos requested but the video
-    # dir is empty (JSON may pre-date video support).
+    # dir is empty (JSON may pre-date video support). --force overrides.
     rf_video_dir = target.epoch_dir() / "rollout_fidelity" / "videos"
     rf_videos_missing = (args.rollout_write_videos > 0 and
                          (not rf_video_dir.exists() or not any(rf_video_dir.iterdir())))
-    rf_needs_run = needs_rollout and (not rf_json_exists or rf_videos_missing)
-    pz_needs_run = (needs_predicted_z and not pz_json_exists) or (
-        (ar_needs_run or rf_needs_run) and not state_head_path.exists())
+    rf_needs_run = needs_rollout and (args.force or not rf_json_exists or rf_videos_missing)
+    pz_needs_run = (
+        (needs_predicted_z and (args.force or not pz_json_exists))
+        or ((ar_needs_run or rf_needs_run) and not state_head_path.exists())
+    )
 
     if ar_needs_run:
         print(f"Action-response needs keys: {sorted(missing_ar)} (existing: {sorted(existing_ar_keys)})")
@@ -568,7 +576,7 @@ def main():
 
     if needs_cross_head:
         cross_head_json = target.epoch_dir() / f"cross_head_{args.reference_tag}" / "cross_head.json"
-        if cross_head_json.exists():
+        if cross_head_json.exists() and not args.force:
             pass
         elif args.reference_state_head:
             predicted_z_cache = next(probe_subdir.glob("predicted_z_aligned_*.npz"))
