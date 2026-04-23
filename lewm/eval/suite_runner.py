@@ -232,14 +232,16 @@ def _run_action_response_group(target: EvalTarget, cache_dir: Path,
 
 def _run_rollout_fidelity(target: EvalTarget, cache_dir: Path,
                           state_head_path: Path,
-                          write_videos: int = 10):
+                          write_videos: int = 10,
+                          scenarios: list[str] | None = None):
     out_dir = target.epoch_dir() / "rollout_fidelity"
     out_dir.mkdir(parents=True, exist_ok=True)
+    datasets = scenarios if scenarios else target.cfg["datasets"][:4]
     cmd = [
         "python", "lewm/scripts/eval_rollout_fidelity.py",
         "--model", str(target.ckpt_path()),
         "--state-head", str(state_head_path),
-        "--datasets", *target.cfg["datasets"][:4],
+        "--datasets", *datasets,
         "--cache-dir", str(cache_dir),
         "--output-dir", str(out_dir),
         "--ctx-len", str(target.cfg["ctx_len"]),

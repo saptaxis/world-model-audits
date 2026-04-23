@@ -217,25 +217,33 @@ def _format_cluster_c(results: dict) -> list[str]:
             lines.append("")
             lines.append(f"  Read (T1): {v1}")
 
-            # Cross-reference T1 (counterfactual action swap) vs T9 (recorded
-            # action modification) to quantify how much of the predictor's
-            # modification magnitude is action-driven.
+            # Scale comparison between T1 (counterfactual action-swap magnitude)
+            # and T9 (natural predictor modification under recorded action).
+            # NOT a literal decomposition — just a scale reference.
             t9 = results.get("test_9_predictor_modification")
             if t9 and t9.get("rel_norm", 0) > 1e-6:
-                share = max_rel / t9["rel_norm"]
-                lines.append(f"  Share of predictor magnitude that's action-driven:")
-                lines.append(f"    T1_max / T9 = {max_rel:.3f} / {t9['rel_norm']:.3f} = {share:.0%}")
-                if share >= 0.5:
-                    v_share = (f"most (~{share:.0%}) of the predictor's z-modification "
-                               "is action-conditioned. Action channel is doing the bulk "
-                               "of the predictive work.")
-                elif share >= 0.2:
-                    v_share = (f"partial (~{share:.0%}) of the predictor's modification "
-                               "is action-conditioned. History dynamics explain the rest.")
-                else:
-                    v_share = (f"minor (~{share:.0%}) of predictor modification is action-"
-                               "conditioned. Most z-change comes from history, not action.")
-                lines.append(f"  Read (T1 vs T9): {v_share}")
+                ratio = max_rel / t9["rel_norm"]
+                lines.append(f"  Scale ref: T1_max / T9 = {max_rel:.3f} / {t9['rel_norm']:.3f} = {ratio:.2f}")
+                lines.append(f"  Read (T1 vs T9): counterfactual action-swap magnitude is "
+                             f"{'comparable to' if 0.6 <= ratio <= 1.4 else 'smaller than' if ratio < 0.6 else 'larger than'} "
+                             "the predictor's natural modification scale, meaning the action channel "
+                             "materially contributes to z-change. (Not a literal decomposition of "
+                             "predictor work — both measure different z-deltas.)")
+
+        # T1 vs T7 disagreement check: action affects z substantially but decoded
+        # kinematics barely move → signal is in kinematically illegible directions.
+        if t1 and t7:
+            t1_max = max(
+                (d.get("rel_norm", 0) for d in t1.values() if isinstance(d, dict)),
+                default=0,
+            )
+            t7_max_abs = max(abs(v) for v in t7.values() if isinstance(v, (int, float)))
+            if t1_max >= 0.3 and t7_max_abs < 0.05:
+                lines.append("")
+                lines.append(f"  Read (T1 vs T7): T1 is large ({t1_max:.2f}) but T7's decoded "
+                             f"effect is small (max |Δ-state| = {t7_max_abs:.4f}). Action signal "
+                             "exists strongly in z-space but lives largely in directions that "
+                             "don't decode to kinematic state. State_head reads little of it.")
 
     if t7:
         lines.append("")
@@ -332,15 +340,29 @@ def _format_cluster_d(results: dict) -> list[str]:
             if side_r2 is not None:
                 lines.append(f"      Side thrust → Δang_vel R² {side_r2:+.3f}")
 
-        def _verdict(r2):
-            if r2 > 0.9: return "physics-like (linear + monotone)"
-            if r2 > 0.5: return "monotone but nonlinear"
-            if r2 >= 0: return "weak/inconsistent response"
-            return "non-monotone (possibly step-function)"
+        def _verdict(r2, max_abs_decoded):
+            # Bucket by linearity, then flag if decoded magnitude is small.
+            weak_decoded = (max_abs_decoded is not None and max_abs_decoded < 0.05)
+            if r2 > 0.9:
+                base = "linear + monotone"
+            elif r2 > 0.5:
+                base = "monotone but nonlinear"
+            elif r2 >= 0:
+                base = "weak/inconsistent response"
+            else:
+                base = "non-monotone (possibly step-function)"
+            if weak_decoded and r2 > 0.5:
+                return f"{base}, but weak in decoded state (max |Δ| = {max_abs_decoded:.4f})"
+            if weak_decoded:
+                return f"{base} and weak in decoded state (max |Δ| = {max_abs_decoded:.4f})"
+            return base
 
         if main_r2 is not None and side_r2 is not None:
+            main_max_dvy = max((abs(r.get("dvy", 0)) for r in main_rows), default=None)
+            side_max_dang = max((abs(r.get("dang_vel", 0)) for r in side_rows), default=None)
             lines.append("")
-            lines.append(f"  Read (T2): main = {_verdict(main_r2)}; side = {_verdict(side_r2)}.")
+            lines.append(f"  Read (T2): main = {_verdict(main_r2, main_max_dvy)};")
+            lines.append(f"             side = {_verdict(side_r2, side_max_dang)}.")
 
     if t3:
         lines.append("")
@@ -369,12 +391,19 @@ def _format_cluster_d(results: dict) -> list[str]:
 
     if t4:
         lines.append("")
-        lines.append("  T4 OOD-action response:")
+        lines.append("  T4 OOD-action response (z-norm + decoded Δ-state):")
+        lines.append(f"    {'name':<22s} {'‖Δz‖/‖z‖':>10s}  {'Δvy':>8s}  {'Δang_vel':>9s}  {'Δx':>8s}  {'Δy':>8s}")
         for item in t4.get("ood_actions", []):
             name = item.get("name", "?")
             rel = item.get("rel_norm_zdiff")
-            if rel is not None:
-                lines.append(f"    {name:<22s} ‖Δz‖/‖z‖ = {rel:.3f}")
+            d = item.get("decoded_dstate", {})
+            if rel is None:
+                continue
+            lines.append(
+                f"    {name:<22s} {rel:>10.3f}  "
+                f"{d.get('vy', 0):>+8.4f}  {d.get('ang_vel', 0):>+9.4f}  "
+                f"{d.get('x', 0):>+8.4f}  {d.get('y', 0):>+8.4f}"
+            )
     lines.append("")
     return lines
 
@@ -412,6 +441,160 @@ def _format_cluster_e(results: dict) -> list[str]:
     return lines
 
 
+def _format_coverage_and_classification(results: dict) -> list[str]:
+    """Two footer sections: (1) spec-coverage status per cluster, (2) Q1-Q4
+    case classification synthesized from whatever's present."""
+    lines = ["─" * 70, "SPEC COVERAGE", "─" * 70]
+
+    enc = "encoder_z_probe" in results
+    pred = "predicted_z_probe" in results
+    a_status = "✓ complete" if (enc and pred) else ("⚠ partial" if (enc or pred) else "✗ missing")
+    lines.append(f"  [A] encoder vs predicted-z decodability:  {a_status}")
+
+    b_have = {k for k in ("test_9_predictor_modification", "test_10_offline_predloss",
+                          "test_11_encoder_forward_coherence") if k in results}
+    b_status = "✓ complete" if len(b_have) == 3 else (
+        f"⚠ partial ({len(b_have)}/3)" if b_have else "✗ missing")
+    lines.append(f"  [B] predictor basic activity (T9/T10/T11): {b_status}")
+
+    t1 = "test_1_raw_zdiff" in results
+    t7 = "test_7_fresh_state_head_action_response" in results
+    t8_raw = results.get("test_8_in_model_aux_head_action_response")
+    t8_ok = bool(t8_raw) and not (isinstance(t8_raw, dict) and t8_raw.get("skipped"))
+    t8_inapplicable = isinstance(t8_raw, dict) and t8_raw.get("skipped")
+    t6_impl = False  # Test 6 per-stage action propagation not implemented in first wave.
+    c_pieces = []
+    c_pieces.append("T1 ✓" if t1 else "T1 ✗")
+    c_pieces.append("T7 ✓" if t7 else "T7 ✗")
+    if t8_ok:
+        c_pieces.append("T8 ✓")
+    elif t8_inapplicable:
+        c_pieces.append("T8 n/a (no aux head)")
+    else:
+        c_pieces.append("T8 ✗")
+    c_pieces.append("T6 not implemented")
+    c_core_done = t1 and t7 and (t8_ok or t8_inapplicable)
+    c_status = "⚠ partial — " + ", ".join(c_pieces) if not c_core_done or not t6_impl else "✓ complete"
+    lines.append(f"  [C] predictor action-pathway:              {c_status}")
+
+    t2 = "test_2_action_magnitude_sweep" in results
+    t3 = "test_3_rollout_fidelity" in results
+    t4 = "test_4_ood_actions" in results
+    d_pieces = [f"T{n} {'✓' if have else '✗'}" for n, have in [(2, t2), (3, t3), (4, t4)]]
+    t3_scenarios = len(results["test_3_rollout_fidelity"].get("per_dataset", {})) if t3 else 0
+    if t3 and t3_scenarios < 4:
+        d_pieces.append(f"T3 ran on {t3_scenarios}/4 scenarios")
+    all_tests_present = t2 and t3 and t4
+    scenarios_ok = t3_scenarios >= 4
+    if all_tests_present and scenarios_ok:
+        d_status = "✓ complete"
+    elif t2 or t3 or t4:
+        d_status = "⚠ partial — " + ", ".join(d_pieces)
+    else:
+        d_status = "✗ missing"
+    lines.append(f"  [D] predictor physics fidelity:            {d_status}")
+
+    t5 = results.get("test_5_cross_network_state_head")
+    if t5:
+        if isinstance(t5, dict) and "mean_r2" in t5:
+            e_status = "✓ complete (1 reference)"
+        elif isinstance(t5, dict):
+            e_status = f"✓ complete ({len(t5)} reference tag(s))"
+        else:
+            e_status = "⚠ unexpected shape"
+    else:
+        e_status = "✗ missing (requires --reference-state-head)"
+    lines.append(f"  [E] decoder portability:                   {e_status}")
+    lines.append("")
+
+    # Q1–Q4 case classification, synthesized from available data.
+    lines.extend(["─" * 70, "CASE CLASSIFICATION (Q1–Q4)", "─" * 70])
+
+    # Q1 — encoder state-structure
+    if enc and pred:
+        delta = results["predicted_z_probe"]["mean_r2"] - results["encoder_z_probe"]["mean_r2"]
+        q1 = f"✓ yes — encoder R² {results['encoder_z_probe']['mean_r2']:.2f}; predictor adds {delta:+.3f}"
+    elif enc:
+        q1 = f"✓ yes — encoder R² {results['encoder_z_probe']['mean_r2']:.2f} (predicted-z not probed)"
+    else:
+        q1 = "? — encoder-z probe not run"
+    lines.append(f"  Q1 encoder state-structure:         {q1}")
+
+    # Q2 — predictor basic activity
+    t10 = results.get("test_10_offline_predloss")
+    t9v = results.get("test_9_predictor_modification")
+    t11v = results.get("test_11_encoder_forward_coherence")
+    if t10 and t9v and t11v:
+        ratio = t9v["rel_norm"] / max(t11v["rel_norm"], 1e-8)
+        fold = t10["baseline_mse"] / max(t10["mse"], 1e-8)
+        if t10["beats_baseline"] and 0.5 <= ratio <= 1.4:
+            q2 = f"✓ yes — beats identity {fold:.1f}×, T9/T11 ratio {ratio:.2f}"
+        elif t10["beats_baseline"]:
+            q2 = f"✓ yes (with caveats) — beats identity {fold:.1f}× but T9/T11 ratio {ratio:.2f}"
+        else:
+            q2 = f"✗ no — predictor does NOT beat identity baseline"
+    else:
+        q2 = "? — Cluster B not fully populated"
+    lines.append(f"  Q2 predictor basic activity:        {q2}")
+
+    # Q3 — action pathway
+    if t1 and t7:
+        t1_max = max((d.get("rel_norm", 0) for d in results["test_1_raw_zdiff"].values()
+                      if isinstance(d, dict)), default=0)
+        t7_max = max(abs(v) for v in results["test_7_fresh_state_head_action_response"].values()
+                     if isinstance(v, (int, float)))
+        if t1_max >= 0.3 and t7_max >= 0.05:
+            q3 = f"✓ yes — T1 {t1_max:.2f} in z + T7 {t7_max:.3f} decoded"
+        elif t1_max >= 0.3 and t7_max < 0.05:
+            q3 = (f"partial — T1 {t1_max:.2f} (strong in z) but T7 {t7_max:.3f} "
+                  "(weak in decoded state)")
+        elif t1_max < 0.05:
+            q3 = f"✗ no — T1 {t1_max:.2f} (action-inert in z)"
+        else:
+            q3 = f"weak — T1 {t1_max:.2f}"
+    else:
+        q3 = "? — Cluster C not fully populated"
+    lines.append(f"  Q3 action-pathway:                  {q3}")
+
+    # Q4 — physics fidelity
+    q4_bits = []
+    if t2:
+        lin = results["test_2_action_magnitude_sweep"].get("linearity", {})
+        main_r2 = lin.get("main_r2")
+        if main_r2 is not None:
+            main_max = max((abs(r.get("dvy", 0)) for r in
+                            results["test_2_action_magnitude_sweep"].get("main", [])), default=0)
+            q4_bits.append(f"T2-main R² {main_r2:+.2f} (max |Δvy| {main_max:.3f})")
+    if t3:
+        per_ds = results["test_3_rollout_fidelity"].get("per_dataset", {})
+        growths = [v.get("mse_at_20", 0) / max(v.get("mse_at_5", 1e-9), 1e-9) for v in per_ds.values()]
+        if growths:
+            q4_bits.append(f"T3 rollout growth {sum(growths)/len(growths):.1f}×")
+    if q4_bits:
+        q4 = "partial — " + "; ".join(q4_bits)
+    else:
+        q4 = "? — Cluster D not populated"
+    lines.append(f"  Q4 physics fidelity:                {q4}")
+    lines.append("")
+
+    # Provisional one-liner
+    label_parts = []
+    if "✓ yes" in q1: label_parts.append("encoder carries state info")
+    if "✓ yes" in q2: label_parts.append("predictor beats identity")
+    if "partial" in q3: label_parts.append("action matters in z but weakly in decoded state")
+    elif "✓ yes" in q3: label_parts.append("action-conditioned in both z and decoded state")
+    elif "✗ no" in q3: label_parts.append("action-inert")
+    if label_parts:
+        lines.append(f"  Provisional label: {'; '.join(label_parts)}.")
+    lines.append("")
+
+    lines.append("NOTE: this is a partial suite report. Test 6 (per-stage action signal")
+    lines.append("propagation) is not yet implemented. T8 requires an aux-loss checkpoint.")
+    lines.append("T5 requires --reference-state-head. Missing pieces are listed above.")
+    lines.append("")
+    return lines
+
+
 def format_report(target) -> tuple[str, dict]:
     """Render a comprehensive report from whatever's on disk under epoch_dir.
 
@@ -434,6 +617,7 @@ def format_report(target) -> tuple[str, dict]:
     lines.extend(_format_cluster_c(results))
     lines.extend(_format_cluster_d(results))
     lines.extend(_format_cluster_e(results))
+    lines.extend(_format_coverage_and_classification(results))
     return "\n".join(lines), results
 
 
@@ -475,6 +659,11 @@ def main():
                         "comprehensive report from whatever JSONs are already on "
                         "disk under <epoch_dir>/. Useful after tweaking the report "
                         "format or when you want to regenerate without re-running.")
+    p.add_argument("--rollout-scenarios", nargs="+", default=None,
+                   help="Datasets to roll out for Test 3 (Cluster D). Default: "
+                        "first 4 of the training config's datasets. Spec calls "
+                        "for heuristic + impulse-main + impulse-side + "
+                        "ground-stationary — pass explicitly for that set.")
     p.add_argument("--rollout-write-videos", type=int, default=10,
                    help="When Cluster D runs, write schematic-trajectory MP4s for "
                         "the first min(N, n_episodes) rollouts per scenario. "
@@ -572,7 +761,8 @@ def main():
 
         if rf_needs_run:
             _run_rollout_fidelity(target, cache_dir, state_head_path,
-                                  write_videos=args.rollout_write_videos)
+                                  write_videos=args.rollout_write_videos,
+                                  scenarios=args.rollout_scenarios)
 
     if needs_cross_head:
         cross_head_json = target.epoch_dir() / f"cross_head_{args.reference_tag}" / "cross_head.json"
