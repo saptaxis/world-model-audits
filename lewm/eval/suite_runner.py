@@ -92,31 +92,43 @@ class EvalTarget:
         return matches[0]
 
 
-def load_all_available_results(target: EvalTarget) -> dict:
+def load_all_available_results(target: EvalTarget) -> tuple[dict, dict]:
     """Scan <epoch_dir>/ and load every test result present on disk.
 
-    Independent of --selected. Always returns a flat dict {test_name: result_dict}
-    containing whatever's available. Missing tests are absent from the dict.
-
-    Test 5 (cross-network state-head) may have multiple instances (one per
-    reference-tag); when >1 is found, the entry is a dict {tag: result_dict}
-    rather than a single result.
+    Returns (results, metadata):
+      - results: flat {test_name: result_dict}. Test 5 becomes a {tag: result}
+        when multiple reference-tags exist.
+      - metadata: subset of fields pulled from the per-file JSON metadata —
+        normalize_actions, n_frames (AR sample size), n_episodes + seq_len
+        (rollout sample size) — for the report header.
     """
     results: dict = {}
+    metadata: dict = {}
     epoch_dir = target.epoch_dir()
 
-    # Flat files with one or more test keys in their results.
     files_to_try = [
-        epoch_dir / "encoder_z" / "r2_report.json",
-        epoch_dir / "predicted_z" / "r2_report_normZ.json",
-        epoch_dir / "action_response" / "action_response_report_normZ.json",
-        epoch_dir / "rollout_fidelity" / "rollout_fidelity.json",
+        ("encoder_z", epoch_dir / "encoder_z" / "r2_report.json"),
+        ("predicted_z", epoch_dir / "predicted_z" / "r2_report_normZ.json"),
+        ("action_response", epoch_dir / "action_response" / "action_response_report_normZ.json"),
+        ("rollout_fidelity", epoch_dir / "rollout_fidelity" / "rollout_fidelity.json"),
     ]
-    for path in files_to_try:
-        if path.exists():
-            data = json.loads(path.read_text())
-            for test_name, test_data in data.get("results", {}).items():
-                results[test_name] = test_data
+    for tag, path in files_to_try:
+        if not path.exists():
+            continue
+        data = json.loads(path.read_text())
+        for test_name, test_data in data.get("results", {}).items():
+            results[test_name] = test_data
+        # Pull metadata fields we care about for the header.
+        meta = data.get("metadata", {})
+        if "normalize_actions" in meta and "normalize_actions" not in metadata:
+            metadata["normalize_actions"] = meta["normalize_actions"]
+        if tag == "action_response" and "n_frames" in meta:
+            metadata["ar_n_frames"] = meta["n_frames"]
+        if tag == "rollout_fidelity":
+            if "n_episodes" in meta:
+                metadata["rollout_n_episodes"] = meta["n_episodes"]
+            if "seq_len" in meta:
+                metadata["rollout_seq_len"] = meta["seq_len"]
 
     # Test 5: glob every cross_head_<tag>/ (may be multiple reference-tags).
     cross_head_by_tag: dict = {}
@@ -132,7 +144,7 @@ def load_all_available_results(target: EvalTarget) -> dict:
     if cross_head_by_tag:
         results["test_5_cross_network_state_head"] = cross_head_by_tag
 
-    return results
+    return results, metadata
 
 
 def resolve_requested_tests(include_clusters, tests, skip_tests,
