@@ -60,6 +60,17 @@ def main():
     p.add_argument("--no-normalize-actions", action="store_false", dest="normalize_actions",
                    default=True)
     p.add_argument("--device", default="cuda")
+    p.add_argument("--write-videos", type=int, default=10,
+                   help="Write schematic-trajectory MP4s for the first "
+                        "min(N, n_episodes) rollouts per scenario. Default 10. "
+                        "Set 0 to disable. Videos land under "
+                        "<output-dir>/videos/<scenario>/rollout_{i:02d}.mp4.")
+    p.add_argument("--rgb-dataset-suffix", default="_rgb",
+                   help="Suffix appended to each --datasets name to locate the "
+                        "paired RGB-frame dataset (e.g. 'heur' → 'heur_rgb'). "
+                        "When present in the cache, videos get the real-pixel "
+                        "panel alongside the schematic; when absent, videos "
+                        "still render with schematic-only view.")
     args = p.parse_args()
 
     out_dir = Path(args.output_dir)
@@ -82,6 +93,19 @@ def main():
     per_dataset_json = {}
 
     for scenario in args.datasets:
+        # If writing videos, try to find a paired RGB dataset (e.g.
+        # lunarlander_synthetic_heuristic → lunarlander_synthetic_heuristic_rgb)
+        # for the real-pixel panel. rollout_episodes handles rgb_dataset_name=None
+        # gracefully — videos render without RGB in that case.
+        rgb_dataset_name = None
+        if args.write_videos > 0 and args.rgb_dataset_suffix:
+            candidate = f"{scenario}{args.rgb_dataset_suffix}"
+            rgb_h5 = Path(args.cache_dir) / f"{candidate}.h5"
+            if rgb_h5.exists():
+                rgb_dataset_name = candidate
+            else:
+                print(f"  (no {rgb_h5.name} in cache — videos will be schematic-only)")
+
         results = rollout_episodes(
             model_path=args.model,
             state_head_path=args.state_head,
@@ -91,12 +115,30 @@ def main():
             seq_len=args.seq_len,
             frameskip=args.frameskip,
             start_mode="episode_start",
+            rgb_dataset_name=rgb_dataset_name,
             device=args.device,
             normalize_actions=args.normalize_actions,
             action_norm_ref=args.action_norm_ref,
             ctx_len=args.ctx_len,
             n_preds=args.n_preds,
         )
+
+        if args.write_videos > 0:
+            from lewm.eval.rollout_viz import render_trajectory_video
+            video_dir = out_dir / "videos" / scenario
+            video_dir.mkdir(parents=True, exist_ok=True)
+            n_write = min(args.write_videos, len(results))
+            print(f"  writing {n_write} videos to {video_dir}")
+            for i in range(n_write):
+                rollout = results[i]
+                path = video_dir / f"rollout_{i:02d}.mp4"
+                render_trajectory_video(
+                    rollout=rollout,
+                    output_path=str(path),
+                    fps=10,
+                    title=f"{scenario} rollout {i}",
+                    actions=rollout["actions"],
+                )
 
         per_step_mse = []
         for t in range(args.seq_len):

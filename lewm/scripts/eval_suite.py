@@ -422,6 +422,10 @@ def main():
                         "comprehensive report from whatever JSONs are already on "
                         "disk under <epoch_dir>/. Useful after tweaking the report "
                         "format or when you want to regenerate without re-running.")
+    p.add_argument("--rollout-write-videos", type=int, default=10,
+                   help="When Cluster D runs, write schematic-trajectory MP4s for "
+                        "the first min(N, n_episodes) rollouts per scenario. "
+                        "Default 10. Set 0 to disable.")
     args = p.parse_args()
 
     run_dir = Path(args.run_dir)
@@ -489,16 +493,21 @@ def main():
                                        tests_requested=set(selected))
 
         if rf_needs_run:
-            _run_rollout_fidelity(target, cache_dir, state_head_path)
+            _run_rollout_fidelity(target, cache_dir, state_head_path,
+                                  write_videos=args.rollout_write_videos)
 
     if needs_cross_head:
         cross_head_json = target.epoch_dir() / f"cross_head_{args.reference_tag}" / "cross_head.json"
-        if not cross_head_json.exists():
-            assert args.reference_state_head, \
-                "Test 5 (cluster E) requires --reference-state-head"
+        if cross_head_json.exists():
+            pass
+        elif args.reference_state_head:
             predicted_z_cache = next(probe_subdir.glob("predicted_z_aligned_*.npz"))
             _run_cross_head(target, cache_dir, Path(args.reference_state_head),
                             args.reference_tag, predicted_z_cache)
+        else:
+            print("Cluster E SKIPPED: --reference-state-head not supplied. To run "
+                  "Test 5 cross-network state-head, re-invoke with "
+                  "--reference-state-head PATH --reference-tag <short_name>.")
 
     # Emit comprehensive report — reads everything available on disk
     # regardless of --selected (selected only drives what gets RUN above).
