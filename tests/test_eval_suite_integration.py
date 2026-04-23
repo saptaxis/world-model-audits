@@ -33,12 +33,19 @@ def _seed_fake_run_dir(run_dir: Path, epoch: int):
 
     ep = run_dir / f"epoch_{epoch}"
 
-    # Cluster A
+    # Cluster A — both probes
     _write(ep / "encoder_z" / "r2_report.json", {
         "schema_version": "e5-eval-suite-v1",
         "metadata": {}, "results": {
             "encoder_z_probe": {"mean_r2": 0.85,
-                                 "per_dim_r2": {"x": 0.9, "y": 0.8}}}})
+                                 "per_dim_r2": {"x": 0.9, "y": 0.8, "vx": 0.7,
+                                                "vy": 0.95, "angle": 0.9, "ang_vel": 0.4}}}})
+    _write(ep / "predicted_z" / "r2_report_normZ.json", {
+        "schema_version": "e5-eval-suite-v1",
+        "metadata": {}, "results": {
+            "predicted_z_probe": {"mean_r2": 0.88,
+                                   "per_dim_r2": {"x": 0.9, "y": 0.8, "vx": 0.75,
+                                                  "vy": 0.97, "angle": 0.92, "ang_vel": 0.55}}}})
 
     # Clusters B + C + D (shared action-response JSON)
     _write(ep / "action_response" / "action_response_report_normZ.json", {
@@ -94,7 +101,7 @@ def test_orchestrator_aggregates_all_clusters_from_cached_jsons(tmp_path):
         assert f"Cluster {cluster_id}:" in report_txt
 
     expected_tests = {
-        "encoder_z_probe",
+        "encoder_z_probe", "predicted_z_probe",
         "test_1_raw_zdiff", "test_7_fresh_state_head_action_response",
         "test_8_in_model_aux_head_action_response",
         "test_9_predictor_modification", "test_10_offline_predloss",
@@ -106,22 +113,24 @@ def test_orchestrator_aggregates_all_clusters_from_cached_jsons(tmp_path):
     assert expected_tests.issubset(set(report_json["results"].keys()))
 
 
-def test_orchestrator_partial_selection_only_runs_requested(tmp_path):
-    """--tests 9 10 11 should pull only Cluster B keys into the aggregated report."""
+def test_report_only_mode_skips_dispatch(tmp_path):
+    """--report-only re-renders from disk without running any sub-script.
+
+    The fake checkpoint is 0 bytes, so any attempt to actually load it would
+    crash. Successful completion proves nothing was dispatched.
+    """
     run_dir = tmp_path / "fake_run"
     _seed_fake_run_dir(run_dir, epoch=1)
 
     cmd = [sys.executable, "lewm/scripts/eval_suite.py",
            "--run-dir", str(run_dir), "--epoch", "1",
            "--cache-dir", str(tmp_path / "unused-cache"),
-           "--tests", "9", "10", "11"]
+           "--report-only"]
     result = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
 
     report_json = json.loads(
         (run_dir / "epoch_1" / "eval_suite_report.json").read_text())
-    assert set(report_json["results"].keys()) == {
-        "test_9_predictor_modification",
-        "test_10_offline_predloss",
-        "test_11_encoder_forward_coherence",
-    }
+    assert "encoder_z_probe" in report_json["results"]
+    assert "predicted_z_probe" in report_json["results"]
+    assert "test_9_predictor_modification" in report_json["results"]
