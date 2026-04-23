@@ -640,7 +640,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--model", required=True, help="LeWorldModel _object.ckpt path")
-    parser.add_argument("--dataset", nargs="+", default=["lunarlander_heuristic"],
+    parser.add_argument("--dataset", nargs="+", required=True,
                         help="One or more HDF5 dataset names")
     parser.add_argument("--cache-dir", default="/media/hdd1/physics-priors-latent-space/lunar-lander-data")
     parser.add_argument("--output-dir", required=True, help="Where to save state head + results")
@@ -673,10 +673,12 @@ def main():
                              "Default ON. Pass --no-normalize-actions for broken-regime "
                              "multi-dataset checkpoints (pre ConcatDataset transform-"
                              "propagation fix; see e5-05).")
-    parser.add_argument("--action-norm-ref", default="lunarlander_synthetic_heuristic_clean",
-                        help="Reference dataset for reproducing training's action normalizer "
-                             "(must be the FIRST dataset in the training config's data.dataset.name "
-                             "list). Only consulted when --normalize-actions is set.")
+    parser.add_argument("--action-norm-ref", required=True,
+                        help="Reference dataset name for reproducing training's action "
+                             "normalizer (first entry in training config's data.dataset.name). "
+                             "Required — no default — because networks train on different "
+                             "dataset mixes and using the wrong reference silently "
+                             "mis-normalizes actions.")
     parser.add_argument("--z-dims", default=None,
                         help="Slice of z to feed probe, as START:END (e.g. '0:16' for dedicated z_kin). "
                              "Default: use full z.")

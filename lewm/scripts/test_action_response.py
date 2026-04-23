@@ -107,7 +107,10 @@ def main():
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--model", required=True)
     p.add_argument("--state-head", required=True)
-    p.add_argument("--dataset", default="lunarlander_synthetic_heuristic")
+    p.add_argument("--dataset", required=True,
+                   help="Probe dataset name (NOT a list — single dataset for action-response "
+                        "transitions). Required. Use the same dataset the training config "
+                        "uses for the probe sample; typically one of the training datasets.")
     p.add_argument("--cache-dir", default="/media/hdd1/physics-priors-latent-space/lunar-lander-data")
     p.add_argument("--n-frames", type=int, default=200,
                    help="Number of test transitions")
@@ -129,9 +132,12 @@ def main():
                         "checkpoints (pre ConcatDataset transform-propagation fix; see "
                         "e5-05). Report filename includes _normZ vs _normRaw so runs "
                         "don't overwrite.")
-    p.add_argument("--action-norm-ref", default="lunarlander_synthetic_heuristic_clean",
-                   help="Reference dataset for reproducing training's action normalizer. "
-                        "Only consulted when --normalize-actions is set.")
+    p.add_argument("--action-norm-ref", required=True,
+                   help="Reference dataset name for reproducing training's action "
+                        "normalizer (first entry in training config's data.dataset.name). "
+                        "Required — no default — because networks train on different "
+                        "dataset mixes and using the wrong reference silently "
+                        "mis-normalizes actions.")
     args = p.parse_args()
 
     # Resolve action normalizer up-front so the report can state it.
