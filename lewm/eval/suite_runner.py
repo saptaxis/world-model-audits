@@ -108,7 +108,9 @@ def resolve_requested_tests(include_clusters, tests, skip_tests,
     return resolved
 
 
-def _run_encoder_z_probe(target: EvalTarget, cache_dir: Path):
+def _run_encoder_z_probe(target: EvalTarget, cache_dir: Path,
+                         max_frames_per_dataset: int = 75000,
+                         val_split: float = 0.25):
     out_dir = target.epoch_dir() / "encoder_z"
     out_dir.mkdir(parents=True, exist_ok=True)
     cmd = [
@@ -118,13 +120,15 @@ def _run_encoder_z_probe(target: EvalTarget, cache_dir: Path):
         "--cache-dir", str(cache_dir),
         "--output-dir", str(out_dir),
         "--action-norm-ref", target.cfg["action_norm_ref"],
-        "--max-frames-per-dataset", "75000",
-        "--val-split", "0.25",
+        "--max-frames-per-dataset", str(max_frames_per_dataset),
+        "--val-split", str(val_split),
     ]
     subprocess.run(cmd, check=True)
 
 
-def _run_predicted_z_probe(target: EvalTarget, cache_dir: Path):
+def _run_predicted_z_probe(target: EvalTarget, cache_dir: Path,
+                           max_frames_per_dataset: int = 75000,
+                           val_split: float = 0.25):
     out_dir = target.epoch_dir() / "predicted_z"
     out_dir.mkdir(parents=True, exist_ok=True)
     cmd = [
@@ -139,8 +143,8 @@ def _run_predicted_z_probe(target: EvalTarget, cache_dir: Path):
         "--predicted-z",
         "--training-aligned",
         "--normalize-actions",
-        "--max-frames-per-dataset", "75000",
-        "--val-split", "0.25",
+        "--max-frames-per-dataset", str(max_frames_per_dataset),
+        "--val-split", str(val_split),
     ]
     subprocess.run(cmd, check=True)
 
