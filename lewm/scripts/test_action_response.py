@@ -235,7 +235,8 @@ def main():
     def decode(z):
         """Apply state head to (B, D) predicted z, honoring z_slice if set."""
         z_in = z if z_slice is None else z[..., z_slice[0]:z_slice[1]]
-        return state_head(z_in).cpu().numpy()
+        with torch.no_grad():
+            return state_head(z_in).cpu().numpy()
 
     in_model_sh = getattr(model, "state_head", None)
     if args.use_internal_state_head:
