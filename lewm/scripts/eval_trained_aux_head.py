@@ -21,11 +21,13 @@ Usage:
         --model /.../lewm_..._object.ckpt \\
         --cache /.../state_head_*/predicted_z_aligned_ctx{C}_np{P}_norm{Raw,Z}.npz \\
         [--val-split 0.25] [--seed 42] \\
-        [--report-out /path/to/trained_aux_head_eval.txt]
+        [--report-out /path/to/trained_aux_head_eval.txt] \\
+        [--state-head /other_ckpt_dir/state_head.pt]
 
 Outputs: R² per dim + mean, MSE on normalized targets (directly comparable to
 training's aux_kin_loss). Console-only by default; pass --report-out to also
-write a text report.
+write a text report. A JSON sibling is always written alongside the text report
+(or beside the cache if --report-out is omitted).
 """
 import argparse
 import sys
@@ -55,26 +57,53 @@ def main():
     p.add_argument("--report-out", default=None,
                    help="Optional: also write a text report to this path. "
                         "Default: console only.")
+    p.add_argument("--state-head", default=None,
+                   help="Optional: load a state_head.pt from a DIFFERENT checkpoint "
+                        "and apply it to --cache (cross-network portability — Test 5 "
+                        "of the e5-jepa-eval-suite). Overrides the in-model aux head. "
+                        "State-head's z_slice metadata is honored (auto-slicing).")
     args = p.parse_args()
 
     print(f"Loading model {args.model}")
     model = torch.load(args.model, map_location=args.device, weights_only=False)
-    sh = getattr(model, "state_head", None)
-    if sh is None:
-        raise SystemExit("model has no .state_head — was aux loss enabled during training?")
-    W = sh.linear.weight.detach().cpu().numpy()
-    b = sh.linear.bias.detach().cpu().numpy()
-    mean = sh.target_mean.detach().cpu().numpy()
-    std = sh.target_std.detach().cpu().numpy()
-    print(f"state_head.linear: W={W.shape}, b={b.shape}")
-    print(f"target_mean={mean}")
-    print(f"target_std ={std}")
+
+    if args.state_head:
+        from lewm.eval.state_head import load_state_head
+        ext_head, ext_metrics = load_state_head(args.state_head, device=args.device)
+        ext_head.eval()
+        z_slice = ext_metrics.get("z_slice")
+        def _decode(z_batch):
+            z_t = torch.from_numpy(z_batch).float().to(args.device)
+            if z_slice is not None:
+                z_t = z_t[..., z_slice[0]:z_slice[1]]
+            with torch.no_grad():
+                return ext_head(z_t).cpu().numpy()
+        print(f"Using external state_head: {args.state_head}")
+        if z_slice is not None:
+            print(f"  external head expects sliced z [{z_slice[0]}:{z_slice[1]}]")
+        kin_in = None  # not used in external-head path
+    else:
+        sh = getattr(model, "state_head", None)
+        if sh is None:
+            raise SystemExit("model has no .state_head and no --state-head supplied.")
+        W = sh.linear.weight.detach().cpu().numpy()
+        b = sh.linear.bias.detach().cpu().numpy()
+        mean = sh.target_mean.detach().cpu().numpy()
+        std = sh.target_std.detach().cpu().numpy()
+        print(f"state_head.linear: W={W.shape}, b={b.shape}")
+        print(f"target_mean={mean}")
+        print(f"target_std ={std}")
+        kin_in = W.shape[1]
+        def _decode(z_batch):
+            z_slice_arr = z_batch[:, :kin_in]
+            decoded_norm = z_slice_arr @ W.T + b
+            return decoded_norm * std + mean
 
     data = np.load(args.cache)
     z = data["z"]
     s = data["state"][:, :6]
-    kin_in = W.shape[1]
-    print(f"cache: z={z.shape}, state={s.shape}, using z[:, :{kin_in}]")
+    print(f"cache: z={z.shape}, state={s.shape}"
+          + (f", using z[:, :{kin_in}]" if kin_in is not None else ""))
 
     # Replicate probe's train/val split (seed=42 hard-coded in train_state_head)
     n = len(z)
@@ -82,13 +111,11 @@ def main():
     perm = rng.permutation(n)
     split = int((1 - args.val_split) * n)
     val_idx = perm[split:]
-    z_val = z[val_idx, :kin_in]
+    z_val = z[val_idx]
     s_val = s[val_idx]
     print(f"val: {len(val_idx)} frames")
 
-    # Apply trained linear head: decoded is in normalized-state space
-    decoded_norm = z_val @ W.T + b
-    pred_state = decoded_norm * std + mean  # unnormalize for raw-state R²
+    pred_state = _decode(z_val)
 
     r2s = []
     lines = ["=== Trained aux head applied to probe val ==="]
@@ -102,12 +129,17 @@ def main():
         lines.append(f"  {name:8s}: R² = {r2:.4f}")
     lines.append(f"  mean    : R² = {np.mean(r2s):.4f}")
 
-    gt_norm = (s_val - mean) / std
-    mse_norm = float(np.mean((decoded_norm - gt_norm) ** 2))
-    lines.append("")
-    lines.append(f"  MSE on normalized targets = {mse_norm:.6f}")
-    lines.append("  (compare to training log validate/aux_kin_loss — should match if")
-    lines.append("   probe cache's (z, state) pairing matches training's.)")
+    if not args.state_head:
+        gt_norm = (s_val - mean) / std
+        decoded_norm = z_val[:, :kin_in] @ W.T + b
+        mse_norm = float(np.mean((decoded_norm - gt_norm) ** 2))
+        lines.append("")
+        lines.append(f"  MSE on normalized targets = {mse_norm:.6f}")
+        lines.append("  (compare to training log validate/aux_kin_loss — should match if")
+        lines.append("   probe cache's (z, state) pairing matches training's.)")
+    else:
+        lines.append("")
+        lines.append("  (External state_head mode — MSE on normalized targets skipped.)")
 
     print("\n" + "\n".join(lines))
 
@@ -116,6 +148,36 @@ def main():
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text("\n".join(lines) + "\n")
         print(f"\nReport written to {out}")
+
+    from lewm.eval.report_json import write_json_report, metadata_from_args
+    per_dim_r2 = {name: float(r2) for name, r2 in zip(KIN, r2s)}
+    mean_r2 = float(np.mean(r2s))
+    test_key = "test_5_cross_network_state_head" if args.state_head else "aux_head_r2_in_model"
+
+    if args.report_out:
+        json_out_dir = Path(args.report_out).parent
+        json_basename = Path(args.report_out).stem
+    else:
+        json_out_dir = Path(args.cache).parent
+        json_basename = "trained_aux_head_eval"
+
+    write_json_report(
+        out_dir=json_out_dir,
+        basename=json_basename,
+        results_dict={
+            test_key: {
+                "source_state_head": args.state_head,
+                "per_dim_r2": per_dim_r2,
+                "mean_r2": mean_r2,
+            }
+        },
+        metadata=metadata_from_args(args, extra={
+            "cache": args.cache,
+            "state_head_path": args.state_head,
+            "val_split": args.val_split,
+            "seed": args.seed,
+        }),
+    )
 
 
 if __name__ == "__main__":
