@@ -370,6 +370,9 @@ def _format_cluster_d(results: dict) -> list[str]:
         per_ds = t3.get("per_dataset", {})
         growths = []
         for ds, vals in per_ds.items():
+            if vals.get("skipped"):
+                lines.append(f"    {ds:<50s} SKIPPED — {vals.get('reason', 'unknown')}")
+                continue
             m5 = vals.get("mse_at_5", float("nan"))
             m10 = vals.get("mse_at_10", float("nan"))
             m20 = vals.get("mse_at_20", float("nan"))
