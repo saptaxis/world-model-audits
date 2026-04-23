@@ -749,8 +749,17 @@ def main():
 
     if args.output_dir is not None:
         basename = f"action_response_report_norm{'Z' if args.normalize_actions else 'Raw'}"
+        # Merge with whatever's already on disk so partial re-runs accumulate
+        # rather than clobber. Newly computed results override stale ones.
+        out_path = Path(args.output_dir) / f"{basename}.json"
+        if out_path.exists():
+            import json as _json
+            existing = _json.loads(out_path.read_text()).get("results", {})
+            merged = {**existing, **results_dict}
+        else:
+            merged = results_dict
         write_json_report(Path(args.output_dir), basename,
-                          results_dict, metadata_from_args(args))
+                          merged, metadata_from_args(args))
 
     # Close the report file if we opened one.
     if _report_file is not None:
