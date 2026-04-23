@@ -106,22 +106,38 @@ def main():
             else:
                 print(f"  (no {rgb_h5.name} in cache — videos will be schematic-only)")
 
-        results = rollout_episodes(
-            model_path=args.model,
-            state_head_path=args.state_head,
-            dataset_name=scenario,
-            cache_dir=args.cache_dir,
-            n_episodes=args.n_episodes,
-            seq_len=args.seq_len,
-            frameskip=args.frameskip,
-            start_mode="episode_start",
-            rgb_dataset_name=rgb_dataset_name,
-            device=args.device,
-            normalize_actions=args.normalize_actions,
-            action_norm_ref=args.action_norm_ref,
-            ctx_len=args.ctx_len,
-            n_preds=args.n_preds,
-        )
+        try:
+            results = rollout_episodes(
+                model_path=args.model,
+                state_head_path=args.state_head,
+                dataset_name=scenario,
+                cache_dir=args.cache_dir,
+                n_episodes=args.n_episodes,
+                seq_len=args.seq_len,
+                frameskip=args.frameskip,
+                start_mode="episode_start",
+                rgb_dataset_name=rgb_dataset_name,
+                device=args.device,
+                normalize_actions=args.normalize_actions,
+                action_norm_ref=args.action_norm_ref,
+                ctx_len=args.ctx_len,
+                n_preds=args.n_preds,
+            )
+        except ValueError as e:
+            # e.g. "a must be a positive integer" when the dataset has no
+            # episodes long enough for seq_len + seed. Skip gracefully so
+            # other scenarios in the batch still run.
+            print(f"  SKIP {scenario}: no eligible clips for seq_len={args.seq_len} "
+                  f"(error: {e})")
+            per_dataset_json[scenario] = {"skipped": True,
+                                           "reason": f"no clips of length {args.seq_len}"}
+            lines.append(f"  {scenario:<48s}  skipped — no eligible clips")
+            continue
+        if not results:
+            print(f"  SKIP {scenario}: rollout_episodes returned 0 results")
+            per_dataset_json[scenario] = {"skipped": True, "reason": "no rollouts produced"}
+            lines.append(f"  {scenario:<48s}  skipped — 0 rollouts produced")
+            continue
 
         if args.write_videos > 0:
             from lewm.eval.rollout_viz import render_trajectory_video
