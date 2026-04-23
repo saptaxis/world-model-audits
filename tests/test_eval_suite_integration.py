@@ -89,7 +89,8 @@ def test_orchestrator_aggregates_all_clusters_from_cached_jsons(tmp_path):
 
     cmd = [sys.executable, "lewm/scripts/eval_suite.py",
            "--run-dir", str(run_dir), "--epoch", "1",
-           "--cache-dir", str(tmp_path / "unused-cache")]
+           "--cache-dir", str(tmp_path / "unused-cache"),
+           "--rollout-write-videos", "0"]  # test isn't about video dispatch
     result = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
 
