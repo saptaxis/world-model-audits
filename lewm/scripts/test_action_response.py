@@ -610,7 +610,7 @@ def main():
 
         no_action_decoded = decoded["no_action"]
         print(f"  Main thrust sweep (side=0):")
-        print(f"  {'mag':>5s}  {'Δvy':>+10s}  {'Δy':>+10s}")
+        print(f"  {'mag':>5s}  {'Δvy':>10s}  {'Δy':>10s}")
         for mag in sweep_mags:
             z_next = predict_one_step(model, z_history, [mag, 0.0],
                                       args.frameskip, device,
@@ -622,7 +622,7 @@ def main():
             print(f"  {mag:>5.2f}  {dvy:>+10.4f}  {dy:>+10.4f}")
 
         print(f"\n  Side thrust sweep (main=0):")
-        print(f"  {'mag':>5s}  {'Δang_vel':>+10s}  {'Δx':>+10s}")
+        print(f"  {'mag':>5s}  {'Δang_vel':>10s}  {'Δx':>10s}")
         for mag in sweep_mags:
             z_next = predict_one_step(model, z_history, [0.0, mag],
                                       args.frameskip, device,
