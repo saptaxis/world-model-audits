@@ -1,5 +1,7 @@
 name: wm-audits
 
+gpu: true
+
 repos:
   world-model-audits:
     path: ~/Dropbox/code/world-model-audits
