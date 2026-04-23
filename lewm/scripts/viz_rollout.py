@@ -28,7 +28,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", required=True, help="LeWorldModel _object.ckpt")
     parser.add_argument("--state-head", required=True, help="state_head.pt path")
-    parser.add_argument("--dataset", default="lunarlander_heuristic")
+    parser.add_argument("--dataset", required=True)
     parser.add_argument("--cache-dir", default="/media/hdd1/physics-priors-latent-space/lunar-lander-data")
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--n-episodes", type=int, default=5)
@@ -53,9 +53,12 @@ def main():
                              "Pass --no-normalize-actions for broken-regime multi-dataset "
                              "checkpoints (pre ConcatDataset transform-propagation fix; see "
                              "e5-05).")
-    parser.add_argument("--action-norm-ref", default="lunarlander_synthetic_heuristic_clean",
-                        help="Reference dataset for reproducing training's action normalizer. "
-                             "Only consulted when --normalize-actions is set.")
+    parser.add_argument("--action-norm-ref", required=True,
+                        help="Reference dataset name for reproducing training's action "
+                             "normalizer (first entry in training config's data.dataset.name). "
+                             "Required — no default — because networks train on different "
+                             "dataset mixes and using the wrong reference silently "
+                             "mis-normalizes actions.")
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
