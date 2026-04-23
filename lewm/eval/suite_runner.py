@@ -231,7 +231,8 @@ def _run_action_response_group(target: EvalTarget, cache_dir: Path,
 
 
 def _run_rollout_fidelity(target: EvalTarget, cache_dir: Path,
-                          state_head_path: Path):
+                          state_head_path: Path,
+                          write_videos: int = 10):
     out_dir = target.epoch_dir() / "rollout_fidelity"
     out_dir.mkdir(parents=True, exist_ok=True)
     cmd = [
@@ -245,6 +246,7 @@ def _run_rollout_fidelity(target: EvalTarget, cache_dir: Path,
         "--n-preds", str(target.cfg["n_preds"]),
         "--action-norm-ref", target.cfg["action_norm_ref"],
         "--n-episodes", "20", "--seq-len", "20",
+        "--write-videos", str(write_videos),
     ]
     subprocess.run(cmd, check=True)
 
