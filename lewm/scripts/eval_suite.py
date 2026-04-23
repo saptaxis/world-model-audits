@@ -487,7 +487,12 @@ def main():
     rf_json_exists = (target.epoch_dir() / "rollout_fidelity" / "rollout_fidelity.json").exists()
     pz_json_exists = (target.epoch_dir() / "predicted_z" / "r2_report_normZ.json").exists()
     ar_needs_run = bool(missing_ar)
-    rf_needs_run = needs_rollout and not rf_json_exists
+    # Rollout re-runs if JSON missing, OR if videos requested but the video
+    # dir is empty (JSON may pre-date video support).
+    rf_video_dir = target.epoch_dir() / "rollout_fidelity" / "videos"
+    rf_videos_missing = (args.rollout_write_videos > 0 and
+                         (not rf_video_dir.exists() or not any(rf_video_dir.iterdir())))
+    rf_needs_run = needs_rollout and (not rf_json_exists or rf_videos_missing)
     pz_needs_run = (needs_predicted_z and not pz_json_exists) or (
         (ar_needs_run or rf_needs_run) and not state_head_path.exists())
 
