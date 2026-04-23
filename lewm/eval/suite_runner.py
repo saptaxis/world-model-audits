@@ -76,9 +76,11 @@ class EvalTarget:
     run_dir: Path
     epoch: int
     cfg: dict
+    output_base_dir: Path | None = None   # if set, artifacts go under <output_base_dir>/epoch_<N>/ instead of <run_dir>/epoch_<N>/
 
     def epoch_dir(self) -> Path:
-        return self.run_dir / f"epoch_{self.epoch}"
+        base = self.output_base_dir if self.output_base_dir is not None else self.run_dir
+        return Path(base) / f"epoch_{self.epoch}"
 
     def ckpt_path(self) -> Path:
         matches = list(self.run_dir.glob(f"*_epoch_{self.epoch}_object.ckpt"))
