@@ -63,6 +63,12 @@ from lewm.eval.state_head import load_state_head
 
 KIN_NAMES = ["x", "y", "vx", "vy", "angle", "ang_vel"]
 
+DEFAULT_OOD_ACTIONS = {
+    "reverse_main":         [-1.0,  0.0],
+    "full_both_positive":   [ 1.0,  1.0],
+    "full_both_negative":   [-1.0, -1.0],
+}
+
 # ImageNet normalization
 MEAN = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
 STD = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
@@ -102,6 +108,24 @@ def predict_one_step(model, z_history, action_2d, frameskip, device,
     return z_next
 
 
+def predict_one_step_per_sample(model, z_history, actions_2d_per_sample,
+                                frameskip, device, act_mean=None, act_std=None):
+    """Like predict_one_step but each of the N samples gets its own 2-dim action."""
+    N, HS, D = z_history.shape
+    acts = np.asarray(actions_2d_per_sample, dtype=np.float32)  # (N, 2)
+    assert acts.shape == (N, 2)
+    if act_mean is not None:
+        acts = (acts - act_mean) / act_std
+    act_flat = np.tile(acts[:, None, :], (1, frameskip, 1)).reshape(N, frameskip * 2)
+    act_t = torch.from_numpy(act_flat).to(device)
+    act_hs = act_t.unsqueeze(1).expand(N, HS, -1)
+    with torch.no_grad():
+        act_emb = model.action_encoder(act_hs)
+        pred = model.predict(z_history, act_emb)
+        z_next = pred[:, -1]
+    return z_next
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -138,6 +162,33 @@ def main():
                         "Required — no default — because networks train on different "
                         "dataset mixes and using the wrong reference silently "
                         "mis-normalizes actions.")
+    p.add_argument("--raw-zdiff", action="store_true",
+                   help="Also compute raw ‖Δz‖/‖z‖ under action swaps (Test 1 of "
+                        "e5-jepa-eval-suite). Output appended as a new section in "
+                        "the report. Does not require state_head.")
+    p.add_argument("--skip-test-7", action="store_true",
+                   help="Suppress Test 7's direction-accuracy / Δ-state prints and "
+                        "omit its JSON key. Shared z_by_action / decoded dicts are "
+                        "still built (required by other tests in this script).")
+    p.add_argument("--predictor-activity", action="store_true",
+                   help="Also compute predictor modification magnitude (Test 9), "
+                        "offline pred_loss (Test 10), and encoder forward-coherence "
+                        "baseline (Test 11). Requires encoding frame_{t+n_preds} "
+                        "per transition (one extra ViT forward pass per sample).")
+    p.add_argument("--magnitude-sweep", action="store_true",
+                   help="Sweep main thrust ∈ {0, 0.25, 0.5, 0.75, 1.0} with side=0, "
+                        "and side ∈ {0, 0.25, 0.5, 0.75, 1.0} with main=0. Decode "
+                        "Δ-state per magnitude and report linearity (Test 2).")
+    p.add_argument("--ood-actions", action="store_true",
+                   help="Also evaluate predictor response to OOD actions "
+                        "(reverse thrust, uncommon combinations).")
+    p.add_argument("--ood-actions-json", default=None,
+                   help="Optional: path to a JSON file overriding DEFAULT_OOD_ACTIONS "
+                        "(dict of name → [main, side]).")
+    p.add_argument("--use-internal-state-head", action="store_true",
+                   help="For decode in action-response tests, use the checkpoint's "
+                        "own co-trained LinearStateHead (model.state_head) instead "
+                        "of the loaded --state-head probe. Test 8 of the eval suite.")
     args = p.parse_args()
 
     # Resolve action normalizer up-front so the report can state it.
@@ -186,6 +237,27 @@ def main():
         z_in = z if z_slice is None else z[..., z_slice[0]:z_slice[1]]
         return state_head(z_in).cpu().numpy()
 
+    in_model_sh = getattr(model, "state_head", None)
+    if args.use_internal_state_head:
+        if in_model_sh is None:
+            print("WARNING: --use-internal-state-head requested but model has no "
+                  "in-model state_head (aux loss not enabled at training time). "
+                  "Skipping Test 8 section; continuing with external state_head.")
+            test8_applicable = False
+        else:
+            test8_applicable = True
+            W = in_model_sh.linear.weight.detach().cpu().numpy()
+            b = in_model_sh.linear.bias.detach().cpu().numpy()
+            tmean = in_model_sh.target_mean.detach().cpu().numpy()
+            tstd = in_model_sh.target_std.detach().cpu().numpy()
+            kin_in = W.shape[1]
+            def decode_internal(z_batch_t):
+                z_np = z_batch_t.cpu().numpy()[:, :kin_in]
+                decoded_norm = z_np @ W.T + b
+                return decoded_norm * tstd + tmean
+    else:
+        test8_applicable = False
+
     # Load dataset frames (need 3 consecutive frames at frameskip for history)
     import h5py
     import hdf5plugin  # noqa: F401
@@ -199,6 +271,7 @@ def main():
         ep_offset = f["ep_offset"][:]
         pixels_all = f["pixels"]
         state_all = f["state"]
+        action_all = f["action"]
 
         HS = args.ctx_len  # history size (matches training)
         fs = args.frameskip
@@ -216,6 +289,8 @@ def main():
         history_pixels = []  # (N, HS, H, W, 3)
         gt_states_t = []     # (N, 6) state at t (last history frame)
         gt_states_tp1 = []   # (N, 6) state at t + NP (what predictor targets)
+        target_pixels = []   # (N, H, W, 3) target-frame pixels for Tests 10, 11
+        recorded_actions = []  # (N, 2) recorded action at transition boundary
 
         for ep in valid_eps:
             if len(history_pixels) >= n:
@@ -229,6 +304,7 @@ def main():
             # Contiguous slice: all output-step frames for this episode
             ep_pixels = pixels_all[base:base + n_output * fs:fs]  # (n_output, H, W, 3)
             ep_states = state_all[base:base + n_output * fs:fs]   # (n_output, state_dim)
+            ep_actions = action_all[base:base + n_output * fs]    # raw actions (not frameskipped)
 
             # Pick random transitions: need t_start+HS-1 (last history) and
             # t_start+HS-1+NP (target state) to exist.
@@ -240,10 +316,17 @@ def main():
                 history_pixels.append(ep_pixels[t_start:t_start + HS])
                 gt_states_t.append(ep_states[t_start + HS - 1, :6])
                 gt_states_tp1.append(ep_states[t_start + HS - 1 + NP, :6])
+                # Target-frame pixel for Tests 10, 11
+                target_pixels.append(ep_pixels[t_start + HS - 1 + NP])
+                # Recorded action at transition boundary
+                raw_action_idx = (t_start + HS - 1) * fs
+                recorded_actions.append(ep_actions[raw_action_idx])
 
     history_pixels = np.array(history_pixels)  # (N, HS, H, W, 3)
     gt_states_t = np.array(gt_states_t)        # (N, 6)
     gt_states_tp1 = np.array(gt_states_tp1)    # (N, 6)
+    target_pixels = np.array(target_pixels)       # (N, H, W, 3) uint8
+    recorded_actions = np.array(recorded_actions)  # (N, 2) float32
     N = len(history_pixels)
     print(f"Loaded {N} transitions from {args.dataset}")
 
@@ -263,10 +346,12 @@ def main():
     }
 
     # Predict z_{t+1} for each action, decode via state head
-    decoded = {}
+    z_by_action = {}   # action_name -> (N, D) numpy — raw predictor output
+    decoded = {}       # action_name -> (N, 6) numpy — state-head-decoded kinematics
     for name, act in actions.items():
         z_next = predict_one_step(model, z_history, act, args.frameskip, device,
                                   act_mean=act_mean, act_std=act_std)
+        z_by_action[name] = z_next.cpu().numpy()
         with torch.no_grad():
             kin = decode(z_next)  # (N, 6); honors z_slice if state head is sliced
         decoded[name] = kin
@@ -277,11 +362,8 @@ def main():
         kin_t = decode(z_t)
 
     # ============================================================
-    # Direction tests
+    # Direction tests (Test 7)
     # ============================================================
-    print("\n" + "=" * 70)
-    print("ACTION-RESPONSE DIRECTION TEST")
-    print("=" * 70)
 
     def direction_accuracy(pred_a, pred_b, dim, expected_sign):
         """Fraction of samples where (pred_a - pred_b)[dim] has expected sign."""
@@ -294,172 +376,381 @@ def main():
     def mean_diff(pred_a, pred_b, dim):
         return (pred_a[:, dim] - pred_b[:, dim]).mean()
 
-    # Test 1: Main thrust → vy increases relative to no-action
-    acc = direction_accuracy(decoded["main_thrust"], decoded["no_action"], 3, +1)
-    md = mean_diff(decoded["main_thrust"], decoded["no_action"], 3)
-    print(f"\n1. Main thrust → vy increases (vs no_action)")
-    print(f"   Direction accuracy: {acc:.1%}  (mean Δvy: {md:+.4f})")
+    if not args.skip_test_7:
+        print("\n" + "=" * 70)
+        print("ACTION-RESPONSE DIRECTION TEST")
+        print("=" * 70)
 
-    # Test 2: No action → vy decreases relative to current (gravity)
-    acc = direction_accuracy(decoded["no_action"], kin_t, 3, -1)
-    md = mean_diff(decoded["no_action"], kin_t, 3)
-    print(f"\n2. No action → vy decreases (gravity)")
-    print(f"   Direction accuracy: {acc:.1%}  (mean Δvy: {md:+.4f})")
+        # Test 1: Main thrust → vy increases relative to no-action
+        acc = direction_accuracy(decoded["main_thrust"], decoded["no_action"], 3, +1)
+        md = mean_diff(decoded["main_thrust"], decoded["no_action"], 3)
+        print(f"\n1. Main thrust → vy increases (vs no_action)")
+        print(f"   Direction accuracy: {acc:.1%}  (mean Δvy: {md:+.4f})")
 
-    # Test 3: Side right thrust (action[1]=+1) → angular_vel DECREASES (vs no_action)
-    # Sign convention: action[1]=+1 fires the right engine, which by Box2D
-    # physics applies a counter-torque that makes Δang_vel NEGATIVE.
-    # Verified empirically on all 7 training datasets with side-thrust frames.
-    acc_av = direction_accuracy(decoded["side_right"], decoded["no_action"], 5, -1)
-    md_av = mean_diff(decoded["side_right"], decoded["no_action"], 5)
-    acc_a = direction_accuracy(decoded["side_right"], decoded["no_action"], 4, -1)
-    md_a = mean_diff(decoded["side_right"], decoded["no_action"], 4)
-    print(f"\n3. Side right thrust (action[1]=+1) → angular_vel DECREASES (vs no_action)")
-    print(f"   ang_vel direction accuracy: {acc_av:.1%}  (mean Δang_vel: {md_av:+.4f})")
-    print(f"   angle direction accuracy:   {acc_a:.1%}  (mean Δangle: {md_a:+.4f})")
+        # Test 2: No action → vy decreases relative to current (gravity)
+        acc = direction_accuracy(decoded["no_action"], kin_t, 3, -1)
+        md = mean_diff(decoded["no_action"], kin_t, 3)
+        print(f"\n2. No action → vy decreases (gravity)")
+        print(f"   Direction accuracy: {acc:.1%}  (mean Δvy: {md:+.4f})")
 
-    # Test 4: Side left thrust (action[1]=-1) → angular_vel INCREASES (opposite of right)
-    acc_av = direction_accuracy(decoded["side_left"], decoded["no_action"], 5, +1)
-    md_av = mean_diff(decoded["side_left"], decoded["no_action"], 5)
-    print(f"\n4. Side left thrust (action[1]=-1) → angular_vel INCREASES (vs no_action)")
-    print(f"   ang_vel direction accuracy: {acc_av:.1%}  (mean Δang_vel: {md_av:+.4f})")
+        # Test 3: Side right thrust (action[1]=+1) → angular_vel DECREASES (vs no_action)
+        # Sign convention: action[1]=+1 fires the right engine, which by Box2D
+        # physics applies a counter-torque that makes Δang_vel NEGATIVE.
+        # Verified empirically on all 7 training datasets with side-thrust frames.
+        acc_av = direction_accuracy(decoded["side_right"], decoded["no_action"], 5, -1)
+        md_av = mean_diff(decoded["side_right"], decoded["no_action"], 5)
+        acc_a = direction_accuracy(decoded["side_right"], decoded["no_action"], 4, -1)
+        md_a = mean_diff(decoded["side_right"], decoded["no_action"], 4)
+        print(f"\n3. Side right thrust (action[1]=+1) → angular_vel DECREASES (vs no_action)")
+        print(f"   ang_vel direction accuracy: {acc_av:.1%}  (mean Δang_vel: {md_av:+.4f})")
+        print(f"   angle direction accuracy:   {acc_a:.1%}  (mean Δangle: {md_a:+.4f})")
 
-    # Test 5: Symmetry — left vs right produce opposite angle changes
-    diff_right = decoded["side_right"][:, 5] - decoded["no_action"][:, 5]
-    diff_left = decoded["side_left"][:, 5] - decoded["no_action"][:, 5]
-    opposite = ((diff_right > 0) & (diff_left < 0)) | ((diff_right < 0) & (diff_left > 0))
-    print(f"\n5. Symmetry: left and right produce opposite ang_vel changes")
-    print(f"   Symmetry accuracy: {opposite.mean():.1%}")
+        # Test 4: Side left thrust (action[1]=-1) → angular_vel INCREASES (opposite of right)
+        acc_av = direction_accuracy(decoded["side_left"], decoded["no_action"], 5, +1)
+        md_av = mean_diff(decoded["side_left"], decoded["no_action"], 5)
+        print(f"\n4. Side left thrust (action[1]=-1) → angular_vel INCREASES (vs no_action)")
+        print(f"   ang_vel direction accuracy: {acc_av:.1%}  (mean Δang_vel: {md_av:+.4f})")
 
-    # Test 6: Main thrust → x doesn't change much (vs side thrust)
-    md_main_x = mean_diff(decoded["main_thrust"], decoded["no_action"], 0)
-    md_right_x = mean_diff(decoded["side_right"], decoded["no_action"], 0)
-    md_left_x = mean_diff(decoded["side_left"], decoded["no_action"], 0)
-    print(f"\n6. Lateral specificity: side thrust moves x more than main")
-    print(f"   main→Δx:  {md_main_x:+.4f}")
-    print(f"   right→Δx: {md_right_x:+.4f}")
-    print(f"   left→Δx:  {md_left_x:+.4f}")
+        # Test 5: Symmetry — left vs right produce opposite angle changes
+        diff_right = decoded["side_right"][:, 5] - decoded["no_action"][:, 5]
+        diff_left = decoded["side_left"][:, 5] - decoded["no_action"][:, 5]
+        opposite = ((diff_right > 0) & (diff_left < 0)) | ((diff_right < 0) & (diff_left > 0))
+        print(f"\n5. Symmetry: left and right produce opposite ang_vel changes")
+        print(f"   Symmetry accuracy: {opposite.mean():.1%}")
 
-    # Summary
-    print("\n" + "=" * 70)
-    print("FULL DECODED STATE COMPARISON (mean over N frames)")
-    print("=" * 70)
-    print(f"{'':20s} {'x':>8s} {'y':>8s} {'vx':>8s} {'vy':>8s} {'angle':>8s} {'ang_vel':>8s}")
-    print(f"{'current (z_t)':20s}", end="")
-    for d in range(6):
-        print(f" {kin_t[:, d].mean():+.4f}", end="")
-    print()
-    for name in actions:
-        print(f"{name:20s}", end="")
+        # Test 6: Main thrust → x doesn't change much (vs side thrust)
+        md_main_x = mean_diff(decoded["main_thrust"], decoded["no_action"], 0)
+        md_right_x = mean_diff(decoded["side_right"], decoded["no_action"], 0)
+        md_left_x = mean_diff(decoded["side_left"], decoded["no_action"], 0)
+        print(f"\n6. Lateral specificity: side thrust moves x more than main")
+        print(f"   main→Δx:  {md_main_x:+.4f}")
+        print(f"   right→Δx: {md_right_x:+.4f}")
+        print(f"   left→Δx:  {md_left_x:+.4f}")
+
+        # Summary
+        print("\n" + "=" * 70)
+        print("FULL DECODED STATE COMPARISON (mean over N frames)")
+        print("=" * 70)
+        print(f"{'':20s} {'x':>8s} {'y':>8s} {'vx':>8s} {'vy':>8s} {'angle':>8s} {'ang_vel':>8s}")
+        print(f"{'current (z_t)':20s}", end="")
         for d in range(6):
-            print(f" {decoded[name][:, d].mean():+.4f}", end="")
+            print(f" {kin_t[:, d].mean():+.4f}", end="")
         print()
-    print(f"\n{'Δ main-none':20s}", end="")
-    for d in range(6):
-        print(f" {mean_diff(decoded['main_thrust'], decoded['no_action'], d):+.4f}", end="")
-    print()
-    print(f"{'Δ right-none':20s}", end="")
-    for d in range(6):
-        print(f" {mean_diff(decoded['side_right'], decoded['no_action'], d):+.4f}", end="")
-    print()
-    print(f"{'Δ left-none':20s}", end="")
-    for d in range(6):
-        print(f" {mean_diff(decoded['side_left'], decoded['no_action'], d):+.4f}", end="")
-    print()
+        for name in actions:
+            print(f"{name:20s}", end="")
+            for d in range(6):
+                print(f" {decoded[name][:, d].mean():+.4f}", end="")
+            print()
+        print(f"\n{'Δ main-none':20s}", end="")
+        for d in range(6):
+            print(f" {mean_diff(decoded['main_thrust'], decoded['no_action'], d):+.4f}", end="")
+        print()
+        print(f"{'Δ right-none':20s}", end="")
+        for d in range(6):
+            print(f" {mean_diff(decoded['side_right'], decoded['no_action'], d):+.4f}", end="")
+        print()
+        print(f"{'Δ left-none':20s}", end="")
+        for d in range(6):
+            print(f" {mean_diff(decoded['side_left'], decoded['no_action'], d):+.4f}", end="")
+        print()
 
-    # GT reference: what actually happens in the dataset
-    gt_delta = gt_states_tp1 - gt_states_t
-    print(f"\n{'GT Δ (dataset)':20s}", end="")
-    for d in range(6):
-        print(f" {gt_delta[:, d].mean():+.4f}", end="")
-    print()
-    print(f"\n(GT is average delta across all sampled transitions, not action-specific)")
+        # GT reference: what actually happens in the dataset
+        gt_delta = gt_states_tp1 - gt_states_t
+        print(f"\n{'GT Δ (dataset)':20s}", end="")
+        for d in range(6):
+            print(f" {gt_delta[:, d].mean():+.4f}", end="")
+        print()
+        print(f"\n(GT is average delta across all sampled transitions, not action-specific)")
 
-    # ============================================================
-    # SUSTAINED + DELAYED ACTION TEST
-    # ============================================================
-    print("\n\n" + "=" * 70)
-    print("SUSTAINED & DELAYED ACTION TEST (5-step rollout)")
-    print("=" * 70)
-    print("\nRolling out 5 steps with constant action. If the predictor has a")
-    print("delayed response, the effect should appear at steps 2-5 even if")
-    print("step 1 shows nothing.\n")
+        # ============================================================
+        # SUSTAINED + DELAYED ACTION TEST
+        # ============================================================
+        print("\n\n" + "=" * 70)
+        print("SUSTAINED & DELAYED ACTION TEST (5-step rollout)")
+        print("=" * 70)
+        print("\nRolling out 5 steps with constant action. If the predictor has a")
+        print("delayed response, the effect should appear at steps 2-5 even if")
+        print("step 1 shows nothing.\n")
 
-    N_ROLLOUT = 5
+        N_ROLLOUT = 5
 
-    def rollout_n_steps(model, z_hist, action_2d, n_steps, frameskip, device, state_head):
-        """Autoregressive rollout: predict n_steps ahead with constant action."""
-        z_h = z_hist.clone()  # (N, HS, D)
-        decoded_per_step = []
-        for _ in range(n_steps):
-            z_next = predict_one_step(model, z_h, action_2d, frameskip, device,
-                                      act_mean=act_mean, act_std=act_std)
-            with torch.no_grad():
-                kin = decode(z_next)
-            decoded_per_step.append(kin)
-            # Shift history: drop oldest, append new
-            z_h = torch.cat([z_h[:, 1:, :], z_next.unsqueeze(1)], dim=1)
-        return decoded_per_step  # list of (N, 6), one per step
+        def rollout_n_steps(model, z_hist, action_2d, n_steps, frameskip, device, state_head):
+            """Autoregressive rollout: predict n_steps ahead with constant action."""
+            z_h = z_hist.clone()  # (N, HS, D)
+            decoded_per_step = []
+            for _ in range(n_steps):
+                z_next = predict_one_step(model, z_h, action_2d, frameskip, device,
+                                          act_mean=act_mean, act_std=act_std)
+                with torch.no_grad():
+                    kin = decode(z_next)
+                decoded_per_step.append(kin)
+                # Shift history: drop oldest, append new
+                z_h = torch.cat([z_h[:, 1:, :], z_next.unsqueeze(1)], dim=1)
+            return decoded_per_step  # list of (N, 6), one per step
 
-    rollouts = {}
-    for name, act in actions.items():
-        rollouts[name] = rollout_n_steps(
-            model, z_history, act, N_ROLLOUT, args.frameskip, device, state_head
+        rollouts = {}
+        for name, act in actions.items():
+            rollouts[name] = rollout_n_steps(
+                model, z_history, act, N_ROLLOUT, args.frameskip, device, state_head
+            )
+
+        # Compare main_thrust vs no_action at each step
+        print("Main thrust vs no_action — vy direction accuracy per step:")
+        print(f"  {'step':>5s}  {'accuracy':>8s}  {'mean Δvy':>10s}")
+        for step in range(N_ROLLOUT):
+            acc = direction_accuracy(rollouts["main_thrust"][step],
+                                    rollouts["no_action"][step], 3, +1)
+            md = mean_diff(rollouts["main_thrust"][step],
+                          rollouts["no_action"][step], 3)
+            print(f"  {step+1:>5d}  {acc:>8.1%}  {md:>+10.4f}")
+
+        # Compare side_right vs no_action at each step (expected: Δang_vel NEGATIVE)
+        print("\nSide right vs no_action — ang_vel direction accuracy per step (expect Δang_vel<0):")
+        print(f"  {'step':>5s}  {'accuracy':>8s}  {'mean Δang_vel':>14s}")
+        for step in range(N_ROLLOUT):
+            acc = direction_accuracy(rollouts["side_right"][step],
+                                    rollouts["no_action"][step], 5, -1)
+            md = mean_diff(rollouts["side_right"][step],
+                          rollouts["no_action"][step], 5)
+            print(f"  {step+1:>5d}  {acc:>8.1%}  {md:>+14.4f}")
+
+        # Delayed action test: thrust at step 0 only, then no-action for steps 1-4
+        print("\n\nDELAYED ACTION TEST: thrust at step 0 only, then no-action")
+        print("If predictor has a 1-step delay, effect appears at step 2+\n")
+
+        def rollout_impulse(model, z_hist, impulse_action, n_steps, frameskip, device, state_head):
+            """Step 0: impulse_action. Steps 1+: no_action."""
+            z_h = z_hist.clone()
+            no_act = [0.0, 0.0]
+            decoded_per_step = []
+            for step in range(n_steps):
+                act = impulse_action if step == 0 else no_act
+                z_next = predict_one_step(model, z_h, act, frameskip, device,
+                                          act_mean=act_mean, act_std=act_std)
+                with torch.no_grad():
+                    kin = decode(z_next)
+                decoded_per_step.append(kin)
+                z_h = torch.cat([z_h[:, 1:, :], z_next.unsqueeze(1)], dim=1)
+            return decoded_per_step
+
+        impulse_main = rollout_impulse(
+            model, z_history, [1.0, 0.0], N_ROLLOUT, args.frameskip, device, state_head
+        )
+        baseline_none = rollout_n_steps(
+            model, z_history, [0.0, 0.0], N_ROLLOUT, args.frameskip, device, state_head
         )
 
-    # Compare main_thrust vs no_action at each step
-    print("Main thrust vs no_action — vy direction accuracy per step:")
-    print(f"  {'step':>5s}  {'accuracy':>8s}  {'mean Δvy':>10s}")
-    for step in range(N_ROLLOUT):
-        acc = direction_accuracy(rollouts["main_thrust"][step],
-                                rollouts["no_action"][step], 3, +1)
-        md = mean_diff(rollouts["main_thrust"][step],
-                      rollouts["no_action"][step], 3)
-        print(f"  {step+1:>5d}  {acc:>8.1%}  {md:>+10.4f}")
+        print("Impulse main thrust (step 0 only) vs sustained no_action — vy per step:")
+        print(f"  {'step':>5s}  {'accuracy':>8s}  {'mean Δvy':>10s}  {'note':>20s}")
+        for step in range(N_ROLLOUT):
+            acc = direction_accuracy(impulse_main[step], baseline_none[step], 3, +1)
+            md = mean_diff(impulse_main[step], baseline_none[step], 3)
+            note = "← impulse step" if step == 0 else "← coasting (no action)"
+            print(f"  {step+1:>5d}  {acc:>8.1%}  {md:>+10.4f}  {note:>20s}")
 
-    # Compare side_right vs no_action at each step (expected: Δang_vel NEGATIVE)
-    print("\nSide right vs no_action — ang_vel direction accuracy per step (expect Δang_vel<0):")
-    print(f"  {'step':>5s}  {'accuracy':>8s}  {'mean Δang_vel':>14s}")
-    for step in range(N_ROLLOUT):
-        acc = direction_accuracy(rollouts["side_right"][step],
-                                rollouts["no_action"][step], 5, -1)
-        md = mean_diff(rollouts["side_right"][step],
-                      rollouts["no_action"][step], 5)
-        print(f"  {step+1:>5d}  {acc:>8.1%}  {md:>+14.4f}")
+    # --------- Test 1: raw z-differential under action swaps ---------
+    if args.raw_zdiff:
+        from lewm.eval.action_response_metrics import compute_relative_shift
 
-    # Delayed action test: thrust at step 0 only, then no-action for steps 1-4
-    print("\n\nDELAYED ACTION TEST: thrust at step 0 only, then no-action")
-    print("If predictor has a 1-step delay, effect appears at step 2+\n")
+        print("\n" + "=" * 70)
+        print("RAW Z-DIFFERENTIAL UNDER ACTION SWAPS (Test 1)")
+        print("=" * 70)
+        print("  ‖Δz‖/‖z‖ averaged over N transitions; no state_head involved.")
+        print("  Reference z = predict(z_history, no_action).")
+        print()
 
-    def rollout_impulse(model, z_hist, impulse_action, n_steps, frameskip, device, state_head):
-        """Step 0: impulse_action. Steps 1+: no_action."""
-        z_h = z_hist.clone()
-        no_act = [0.0, 0.0]
-        decoded_per_step = []
-        for step in range(n_steps):
-            act = impulse_action if step == 0 else no_act
-            z_next = predict_one_step(model, z_h, act, frameskip, device,
+        z_ref = z_by_action["no_action"]
+        test1_results = {}
+        print(f"  {'action':<16s}  {'‖Δz‖/‖z‖':>10s}  top-k z-dims (L∞)")
+        for name in ["main_thrust", "side_right", "side_left"]:
+            out = compute_relative_shift(z_ref, z_by_action[name], top_k=5)
+            test1_results[name] = {"rel_norm": out["rel_norm"],
+                                    "top_dims": out["top_dims"]}
+            print(f"  {name:<16s}  {out['rel_norm']:>10.4f}  {out['top_dims']}")
+
+    # --------- Tests 9, 10, 11: predictor basic activity ---------
+    if args.predictor_activity:
+        from lewm.eval.action_response_metrics import (
+            compute_relative_shift,
+            compute_offline_predloss,
+        )
+
+        print("\n" + "=" * 70)
+        print("PREDICTOR BASIC ACTIVITY (Tests 9, 10, 11)")
+        print("=" * 70)
+
+        z_true_next = encode_frames(model, target_pixels, device).cpu().numpy()
+        z_by_recorded = predict_one_step_per_sample(
+            model, z_history, recorded_actions,
+            args.frameskip, device, act_mean=act_mean, act_std=act_std,
+        ).cpu().numpy()
+        last_ctx = z_history[:, -1].cpu().numpy()
+
+        test9 = compute_relative_shift(last_ctx, z_by_recorded, top_k=5)
+        test10 = compute_offline_predloss(z_by_recorded, z_true_next, last_ctx)
+        test11 = compute_relative_shift(last_ctx, z_true_next, top_k=5)
+
+        print(f"  Test 9  — predictor modification:  ‖Δ‖/‖last_ctx‖ = {test9['rel_norm']:.4f}")
+        print(f"             top-moving z-dims (L∞): {test9['top_dims']}")
+        print(f"  Test 11 — encoder forward-drift:   ‖Δ‖/‖last_ctx‖ = {test11['rel_norm']:.4f}")
+        print(f"             top-moving z-dims (L∞): {test11['top_dims']}")
+        print(f"  Test 9 / Test 11 ratio:            {test9['rel_norm'] / max(test11['rel_norm'], 1e-8):.3f}")
+        print()
+        print(f"  Test 10 — offline pred_loss (MSE(pred, true_next)):      {test10['mse']:.6f}")
+        print(f"             baseline MSE(last_ctx, true_next):             {test10['baseline_mse']:.6f}")
+        print(f"             predictor beats identity-baseline? {test10['beats_baseline']}")
+
+    if args.magnitude_sweep:
+        print("\n" + "=" * 70)
+        print("ACTION-MAGNITUDE SWEEP (Test 2)")
+        print("=" * 70)
+
+        sweep_mags = [0.0, 0.25, 0.5, 0.75, 1.0]
+        test2_results = {"main": [], "side": [], "linearity": {}}
+
+        no_action_decoded = decoded["no_action"]
+        print(f"  Main thrust sweep (side=0):")
+        print(f"  {'mag':>5s}  {'Δvy':>+10s}  {'Δy':>+10s}")
+        for mag in sweep_mags:
+            z_next = predict_one_step(model, z_history, [mag, 0.0],
+                                      args.frameskip, device,
                                       act_mean=act_mean, act_std=act_std)
-            with torch.no_grad():
-                kin = decode(z_next)
-            decoded_per_step.append(kin)
-            z_h = torch.cat([z_h[:, 1:, :], z_next.unsqueeze(1)], dim=1)
-        return decoded_per_step
+            dec = decode(z_next)
+            dvy = float((dec[:, 3] - no_action_decoded[:, 3]).mean())
+            dy = float((dec[:, 1] - no_action_decoded[:, 1]).mean())
+            test2_results["main"].append({"mag": mag, "dvy": dvy, "dy": dy})
+            print(f"  {mag:>5.2f}  {dvy:>+10.4f}  {dy:>+10.4f}")
 
-    impulse_main = rollout_impulse(
-        model, z_history, [1.0, 0.0], N_ROLLOUT, args.frameskip, device, state_head
-    )
-    baseline_none = rollout_n_steps(
-        model, z_history, [0.0, 0.0], N_ROLLOUT, args.frameskip, device, state_head
-    )
+        print(f"\n  Side thrust sweep (main=0):")
+        print(f"  {'mag':>5s}  {'Δang_vel':>+10s}  {'Δx':>+10s}")
+        for mag in sweep_mags:
+            z_next = predict_one_step(model, z_history, [0.0, mag],
+                                      args.frameskip, device,
+                                      act_mean=act_mean, act_std=act_std)
+            dec = decode(z_next)
+            dang = float((dec[:, 5] - no_action_decoded[:, 5]).mean())
+            dx = float((dec[:, 0] - no_action_decoded[:, 0]).mean())
+            test2_results["side"].append({"mag": mag, "dang_vel": dang, "dx": dx})
+            print(f"  {mag:>5.2f}  {dang:>+10.4f}  {dx:>+10.4f}")
 
-    print("Impulse main thrust (step 0 only) vs sustained no_action — vy per step:")
-    print(f"  {'step':>5s}  {'accuracy':>8s}  {'mean Δvy':>10s}  {'note':>20s}")
-    for step in range(N_ROLLOUT):
-        acc = direction_accuracy(impulse_main[step], baseline_none[step], 3, +1)
-        md = mean_diff(impulse_main[step], baseline_none[step], 3)
-        note = "← impulse step" if step == 0 else "← coasting (no action)"
-        print(f"  {step+1:>5d}  {acc:>8.1%}  {md:>+10.4f}  {note:>20s}")
+        m_mags = np.array([r["mag"] for r in test2_results["main"]])
+        m_dvy = np.array([r["dvy"] for r in test2_results["main"]])
+        coeffs_main = np.polyfit(m_mags, m_dvy, 1)
+        m_fit = np.polyval(coeffs_main, m_mags)
+        ss_res = ((m_dvy - m_fit) ** 2).sum()
+        ss_tot = ((m_dvy - m_dvy.mean()) ** 2).sum() or 1e-12
+        main_r2 = float(1.0 - ss_res / ss_tot)
+
+        s_mags = np.array([r["mag"] for r in test2_results["side"]])
+        s_dang = np.array([r["dang_vel"] for r in test2_results["side"]])
+        coeffs_side = np.polyfit(s_mags, s_dang, 1)
+        s_fit = np.polyval(coeffs_side, s_mags)
+        ss_res = ((s_dang - s_fit) ** 2).sum()
+        ss_tot = ((s_dang - s_dang.mean()) ** 2).sum() or 1e-12
+        side_r2 = float(1.0 - ss_res / ss_tot)
+
+        test2_results["linearity"] = {"main_r2": main_r2, "side_r2": side_r2}
+        print(f"\n  Linearity R² — main thrust: {main_r2:.3f}, side: {side_r2:.3f}")
+        print(f"  (High R² → physics-like; low or negative → step-function / non-monotone)")
+
+    if args.ood_actions:
+        import json as json_mod
+        from lewm.eval.action_response_metrics import compute_relative_shift
+
+        if args.ood_actions_json:
+            ood_set = json_mod.loads(Path(args.ood_actions_json).read_text())
+        else:
+            ood_set = DEFAULT_OOD_ACTIONS
+
+        print("\n" + "=" * 70)
+        print("OOD ACTION TESTS (Test 4)")
+        print("=" * 70)
+        print(f"  OOD action set: {list(ood_set.keys())}")
+        print()
+
+        test4_results = {"ood_actions": []}
+        for name, action in ood_set.items():
+            z_ood = predict_one_step(model, z_history, action,
+                                     args.frameskip, device,
+                                     act_mean=act_mean, act_std=act_std)
+            z_ood_np = z_ood.cpu().numpy()
+            zdiff = compute_relative_shift(z_by_action["no_action"], z_ood_np, top_k=5)
+            decoded_ood = decode(z_ood)
+            no_action_decoded = decoded["no_action"]
+            dstate = (decoded_ood - no_action_decoded).mean(axis=0).tolist()
+            test4_results["ood_actions"].append({
+                "name": name, "action": action,
+                "rel_norm_zdiff": zdiff["rel_norm"],
+                "top_zdims": zdiff["top_dims"],
+                "decoded_dstate": dict(zip(
+                    ["x", "y", "vx", "vy", "angle", "ang_vel"], dstate
+                )),
+            })
+            print(f"  {name:<22s}  ‖Δz‖/‖z‖ = {zdiff['rel_norm']:.4f}")
+            print(f"  {'':<22s}  decoded Δ: vy={dstate[3]:+.4f}, ang_vel={dstate[5]:+.4f}")
+
+    if args.use_internal_state_head and test8_applicable:
+        print("\n" + "=" * 70)
+        print("IN-MODEL AUX-HEAD ACTION-RESPONSE (Test 8)")
+        print("=" * 70)
+        print("  Same main/side-thrust tests as above but decoded via the")
+        print("  checkpoint's co-trained LinearStateHead, not a fresh MLP probe.")
+        print()
+
+        test8_results = {}
+        for name in ["main_thrust", "side_right", "side_left", "no_action"]:
+            kin_internal = decode_internal(
+                torch.from_numpy(z_by_action[name]).to(device)
+            )
+            test8_results.setdefault("decoded", {})[name] = {
+                "vy_mean":      float(kin_internal[:, 3].mean()),
+                "ang_vel_mean": float(kin_internal[:, 5].mean()),
+            }
+
+        dvy_main = test8_results["decoded"]["main_thrust"]["vy_mean"] - \
+                   test8_results["decoded"]["no_action"]["vy_mean"]
+        dang_right = test8_results["decoded"]["side_right"]["ang_vel_mean"] - \
+                     test8_results["decoded"]["no_action"]["ang_vel_mean"]
+        test8_results["main_thrust_dvy"] = dvy_main
+        test8_results["side_right_dang_vel"] = dang_right
+        print(f"  main thrust → Δvy (in-model head):      {dvy_main:+.4f}")
+        print(f"  side right  → Δang_vel (in-model head): {dang_right:+.4f}")
+
+    # --------- JSON emission ---------
+    from lewm.eval.report_json import write_json_report, metadata_from_args
+
+    results_dict = {}
+    if args.raw_zdiff:
+        results_dict["test_1_raw_zdiff"] = test1_results
+    if not args.skip_test_7:
+        results_dict["test_7_fresh_state_head_action_response"] = {
+            "main_thrust_dvy": float((decoded["main_thrust"][:, 3]
+                                       - decoded["no_action"][:, 3]).mean()),
+            "side_right_dang_vel": float((decoded["side_right"][:, 5]
+                                           - decoded["no_action"][:, 5]).mean()),
+            "side_left_dang_vel":  float((decoded["side_left"][:, 5]
+                                           - decoded["no_action"][:, 5]).mean()),
+        }
+    if args.predictor_activity:
+        results_dict["test_9_predictor_modification"] = test9
+        results_dict["test_10_offline_predloss"] = test10
+        results_dict["test_11_encoder_forward_coherence"] = test11
+    if args.magnitude_sweep:
+        results_dict["test_2_action_magnitude_sweep"] = test2_results
+    if args.ood_actions:
+        results_dict["test_4_ood_actions"] = test4_results
+    if args.use_internal_state_head and test8_applicable:
+        results_dict["test_8_in_model_aux_head_action_response"] = test8_results
+    elif args.use_internal_state_head and not test8_applicable:
+        results_dict["test_8_in_model_aux_head_action_response"] = {
+            "skipped": True,
+            "reason": "model has no in-model state_head (aux loss not enabled at training)",
+        }
+
+    if args.output_dir is not None:
+        basename = f"action_response_report_norm{'Z' if args.normalize_actions else 'Raw'}"
+        write_json_report(Path(args.output_dir), basename,
+                          results_dict, metadata_from_args(args))
 
     # Close the report file if we opened one.
     if _report_file is not None:
