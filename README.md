@@ -103,17 +103,6 @@ Both vendored models are other people's work, tracked as submodules pointing at 
 Each fork keeps its upstream commit history and its upstream `LICENSE` file. The changes are
 listed in each fork's README. `lewm/ARCHITECTURE.md` breaks the boundary down file by file.
 
-If you use LeWorldModel, cite the authors:
-
-```bibtex
-@article{maes_lelidec2026lewm,
-  title={LeWorldModel: Stable End-to-End Joint-Embedding Predictive Architecture from Pixels},
-  author={Maes, Lucas and Le Lidec, Quentin and Scieur, Damien and LeCun, Yann and Balestriero, Randall},
-  journal={arXiv preprint},
-  year={2026}
-}
-```
-
 ## Licence
 
 MIT — see [LICENSE](LICENSE). This covers the code in this repository. The vendored
