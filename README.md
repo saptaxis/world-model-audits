@@ -29,27 +29,24 @@ audit suite proper is under `lewm/`.
 
 ## What the suite checks
 
-`lewm/scripts/eval_suite.py` orchestrates the tests, caches each one's JSON output, and
-renders a single report. Tests are grouped into five clusters, which map onto four questions:
+`lewm/scripts/eval_suite.py` runs the tests, caches each one's JSON output, and renders a
+single report. What it measures:
 
-| | Question | Cluster |
-|---|---|---|
-| **Q1** | Does the latent carry state at all? | **A** — linear probes from encoder-z and predicted-z to the six kinematic dims, per-dim R² |
-| **Q2** | Is the predictor doing work beyond identity? | **B** — predictor-induced Δz, natural encoder drift as a control, and predictor MSE against an identity baseline |
-| **Q3** | Is there a real action pathway? | **C** — z-space response to each action, decoded through both a freshly fit state head and the model's own aux head |
-| **Q4** | Does the implied physics hold up? | **D** — action-magnitude linearity, multi-step rollout error growth, out-of-distribution actions |
-| | Does the latent geometry transfer across runs? | **E** — a state head trained on one checkpoint, applied to another |
-
-The report also carries:
-
-- left/right symmetry and reverse-main sign checks on the thrust response
-- sample sizes, with per-magnitude standard error on the action sweep
-- a coverage list: which tests ran, which are unimplemented, which were skipped for missing
+- linear probes from encoder-z and from predicted-z to the six kinematic dims (x, y, vx, vy,
+  angle, angular velocity), as per-dim R²
+- how much the predictor edits z, against frame-to-frame encoder drift as a control
+- predictor MSE against an identity baseline
+- response in z to each action, decoded to kinematics through both a freshly fit state head
+  and the model's own auxiliary head
+- left/right symmetry and reverse-main sign of the thrust response
+- action-magnitude linearity, with per-magnitude standard error
+- multi-step rollout error growth
+- response to out-of-distribution actions
+- a state head trained on one checkpoint, applied to another
+- sample sizes, and which tests ran, are unimplemented, or were skipped for missing
   prerequisites
 
-Scenarios with no eligible clips are skipped rather than averaged in. Results are cached per
-test; `--force` re-runs a selected subset, and `--report-only` re-renders the report from
-JSONs already on disk.
+Tests are grouped into clusters A–E, selectable with `--include-clusters`.
 
 ## Layout
 
