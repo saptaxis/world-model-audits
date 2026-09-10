@@ -30,7 +30,7 @@ def main():
     parser.add_argument("--model", required=True, help="LeWorldModel _object.ckpt")
     parser.add_argument("--state-head", required=True, help="state_head.pt path")
     parser.add_argument("--dataset", required=True)
-    parser.add_argument("--cache-dir", default=os.environ.get("WMA_CACHE_DIR") or os.environ.get("WMA_LL_DATA"))
+    parser.add_argument("--cache-dir", default=os.environ.get("WMA_LL_DATA"))
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--n-episodes", type=int, default=5)
     parser.add_argument("--seq-len", type=int, default=50)

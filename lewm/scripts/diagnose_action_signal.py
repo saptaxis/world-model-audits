@@ -109,7 +109,7 @@ def main():
     p.add_argument("--model", required=True)
     p.add_argument("--state-head", required=True)
     p.add_argument("--dataset", default="lunarlander_synthetic_heuristic")
-    p.add_argument("--cache-dir", default=os.environ.get("WMA_CACHE_DIR") or os.environ.get("WMA_LL_DATA"))
+    p.add_argument("--cache-dir", default=os.environ.get("WMA_LL_DATA"))
     p.add_argument("--n-frames", type=int, default=100)
     p.add_argument("--frameskip", type=int, default=10)
     p.add_argument("--device", default="cuda")

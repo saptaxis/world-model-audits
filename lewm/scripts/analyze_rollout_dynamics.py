@@ -124,7 +124,7 @@ def main():
     p.add_argument("--model", required=True)
     p.add_argument("--state-head", required=True)
     p.add_argument("--dataset", default="lunarlander_synthetic_heuristic")
-    p.add_argument("--cache-dir", default=os.environ.get("WMA_CACHE_DIR") or os.environ.get("WMA_LL_DATA"))
+    p.add_argument("--cache-dir", default=os.environ.get("WMA_LL_DATA"))
     p.add_argument("--n-episodes", type=int, default=20)
     p.add_argument("--seq-len", type=int, default=15)
     p.add_argument("--frameskip", type=int, default=10)

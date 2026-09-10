@@ -136,7 +136,7 @@ def main():
                    help="Probe dataset name (NOT a list — single dataset for action-response "
                         "transitions). Required. Use the same dataset the training config "
                         "uses for the probe sample; typically one of the training datasets.")
-    p.add_argument("--cache-dir", default=os.environ.get("WMA_CACHE_DIR") or os.environ.get("WMA_LL_DATA"))
+    p.add_argument("--cache-dir", default=os.environ.get("WMA_LL_DATA"))
     p.add_argument("--n-frames", type=int, default=200,
                    help="Number of test transitions")
     p.add_argument("--frameskip", type=int, default=10)

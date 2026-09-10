@@ -652,7 +652,7 @@ def main():
     parser.add_argument("--model", required=True, help="LeWorldModel _object.ckpt path")
     parser.add_argument("--dataset", nargs="+", required=True,
                         help="One or more HDF5 dataset names")
-    parser.add_argument("--cache-dir", default=os.environ.get("WMA_CACHE_DIR") or os.environ.get("WMA_LL_DATA"))
+    parser.add_argument("--cache-dir", default=os.environ.get("WMA_LL_DATA"))
     parser.add_argument("--output-dir", required=True, help="Where to save state head + results")
     parser.add_argument("--max-frames", type=int, default=None,
                         help="Total max frames across all datasets (split evenly for multi-dataset). 0=all.")
