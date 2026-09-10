@@ -40,23 +40,16 @@ renders a single report. Tests are grouped into five clusters, which map onto fo
 | **Q4** | Does the implied physics hold up? | **D** — action-magnitude linearity, multi-step rollout error growth, out-of-distribution actions |
 | | Does the latent geometry transfer across runs? | **E** — a state head trained on one checkpoint, applied to another |
 
-Some things the suite does deliberately:
+The report also carries:
 
-- **Every claim has a null next to it.** "The predictor moved z" is only meaningful against
-  how much z drifts on its own between adjacent frames, so both are measured and the report
-  prints the ratio. Predictor MSE is scored against an identity baseline.
-- **Symmetry and sign checks.** Left and right side thrust should mirror each other; reverse
-  main thrust should flip sign. These catch a model that produces a response of the right
-  magnitude in the wrong direction.
-- **The report states its own coverage.** It prints which tests ran, which are unimplemented,
-  and which were skipped for missing prerequisites, rather than rendering a partial run as a
-  complete one.
-- **Sample sizes are reported**, with per-magnitude standard error on the action sweep so
-  noise is distinguishable from signal.
-- **Scenarios with no eligible clips are skipped rather than averaged in.**
+- left/right symmetry and reverse-main sign checks on the thrust response
+- sample sizes, with per-magnitude standard error on the action sweep
+- a coverage list: which tests ran, which are unimplemented, which were skipped for missing
+  prerequisites
 
-Results are cached per test; `--force` re-runs a selected subset, and `--report-only`
-re-renders the report from JSONs already on disk.
+Scenarios with no eligible clips are skipped rather than averaged in. Results are cached per
+test; `--force` re-runs a selected subset, and `--report-only` re-renders the report from
+JSONs already on disk.
 
 ## Layout
 
