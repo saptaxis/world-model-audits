@@ -21,8 +21,7 @@ those live outside the repo, in run directories. What is here is the machinery t
 them and the tests that cover it.
 
 Paths and configuration come from `env.sh` (see `env.sh.example`), which is machine-local.
-Running any of it needs the models, the datasets and a GPU. If something here is useful to
-you, take it and adapt it; it is MIT licensed.
+Running any of it needs the models, the datasets and a GPU.
 
 `dreamerv3/` is a thin slice — an env wrapper, a training launcher and an eval script. The
 audit suite proper is under `lewm/`.
