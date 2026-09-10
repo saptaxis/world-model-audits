@@ -1,17 +1,18 @@
 #!/bin/bash
 # Convert all 9 episode categories to HDF5 in parallel.
 # Each process logs to its own file. Monitor with:
-#   tail -f ~/vsr-tmp/lewm-convert-Apr082026/*.log
+#   tail -f ${WMA_SCRATCH}/lewm-convert-Apr082026/*.log
 #   # or watch summary:
-#   grep -h "Converting\|Written\|Total" ~/vsr-tmp/lewm-convert-Apr082026/*.log
+#   grep -h "Converting\|Written\|Total" ${WMA_SCRATCH}/lewm-convert-Apr082026/*.log
 set -e
 
-source ~/virtual_envs/lewm/bin/activate
-cd ~/Dropbox/code/world-model-audits
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "${REPO_ROOT}/env.sh"
+cd "${REPO_ROOT}"
 
-DATA=/media/hdd1/physics-priors-latent-space/lunar-lander-data/world_model_data/visual-gym-default-random-heuristic-prims
-OUT=/media/hdd1/physics-priors-latent-space/lunar-lander-data/datasets
-LOGDIR=~/vsr-tmp/lewm-convert-Apr082026
+DATA=${WMA_LL_DATA}/world_model_data/visual-gym-default-random-heuristic-prims
+OUT=${WMA_LL_DATA}/datasets
+LOGDIR=${WMA_SCRATCH}/lewm-convert-Apr082026
 
 mkdir -p "$OUT" "$LOGDIR"
 
@@ -25,9 +26,9 @@ for dir in heuristic random free-fall ground-stationary ground-liftoff ground-si
 done
 
 echo "All 9 launched. Monitor with:"
-echo "  tail -f ~/vsr-tmp/lewm-convert-Apr082026/*.log"
+echo "  tail -f ${WMA_SCRATCH}/lewm-convert-Apr082026/*.log"
 echo "  # or check status:"
-echo "  grep -l 'Written' ~/vsr-tmp/lewm-convert-Apr082026/*.log  # completed ones"
+echo "  grep -l 'Written' ${WMA_SCRATCH}/lewm-convert-Apr082026/*.log  # completed ones"
 echo ""
 echo "Waiting for all to finish..."
 wait

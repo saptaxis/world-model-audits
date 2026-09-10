@@ -10,8 +10,8 @@ If the source has more episodes than the HDF5, the prefix is taken.
 
 Usage:
     python lewm/scripts/augment_hdf5_seeds.py \\
-        --h5 /media/hdd1/.../datasets/lunarlander_synthetic_heuristic.h5 \\
-        --source-dir /media/hdd1/.../world_model_data/gym-default/gym-default-heuristic
+        --h5 $WMA_LL_DATA/datasets/lunarlander_synthetic_heuristic.h5 \\
+        --source-dir $WMA_LL_DATA/world_model_data/gym-default/gym-default-heuristic
 """
 from __future__ import annotations
 

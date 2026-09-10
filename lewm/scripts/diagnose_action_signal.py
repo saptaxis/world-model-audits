@@ -25,10 +25,11 @@ Usage:
         --model /path/to/lewm_object.ckpt \
         --state-head /path/to/state_head.pt \
         --dataset lunarlander_synthetic_heuristic \
-        --cache-dir ~/vsr-tmp/lewm-datasets \
+        --cache-dir $WMA_CACHE_DIR \
         --n-frames 100
 """
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -108,7 +109,7 @@ def main():
     p.add_argument("--model", required=True)
     p.add_argument("--state-head", required=True)
     p.add_argument("--dataset", default="lunarlander_synthetic_heuristic")
-    p.add_argument("--cache-dir", default="/media/hdd1/physics-priors-latent-space/lunar-lander-data")
+    p.add_argument("--cache-dir", default=os.environ.get("WMA_CACHE_DIR") or os.environ.get("WMA_LL_DATA"))
     p.add_argument("--n-frames", type=int, default=100)
     p.add_argument("--frameskip", type=int, default=10)
     p.add_argument("--device", default="cuda")

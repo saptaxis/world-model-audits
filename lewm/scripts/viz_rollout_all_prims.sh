@@ -4,13 +4,14 @@
 # seq_len per dataset chosen based on episode length distribution at frameskip=10.
 set -e
 
-source ~/virtual_envs/lewm/bin/activate
-cd ~/Dropbox/code/world-model-audits
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "${REPO_ROOT}/env.sh"
+cd "${REPO_ROOT}"
 
-MODEL=/media/hdd1/physics-priors-latent-space/lunar-lander-networks/lewm-runs/synthetic-heuristic-fs10/lewm_lunarlander_synthetic_heuristic_fs10_epoch_30_object.ckpt
-SH=/media/hdd1/physics-priors-latent-space/lunar-lander-networks/lewm-runs/synthetic-heuristic-fs10/state_head_epoch30/state_head.pt
-CACHE=/home/vsr/vsr-tmp/lewm-datasets
-OUTBASE=/media/hdd1/physics-priors-latent-space/lunar-lander-networks/lewm-runs/synthetic-heuristic-fs10/rollout_viz_prims
+MODEL=${WMA_LL_NETWORKS}/lewm-runs/synthetic-heuristic-fs10/lewm_lunarlander_synthetic_heuristic_fs10_epoch_30_object.ckpt
+SH=${WMA_LL_NETWORKS}/lewm-runs/synthetic-heuristic-fs10/state_head_epoch30/state_head.pt
+CACHE=${WMA_CACHE_DIR}
+OUTBASE=${WMA_LL_NETWORKS}/lewm-runs/synthetic-heuristic-fs10/rollout_viz_prims
 GPU=${1:-1}
 
 run_viz() {

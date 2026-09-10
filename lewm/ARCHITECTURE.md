@@ -20,7 +20,7 @@ eval_planning.sh                    ← entry point (bash launcher)
 
 ### Library (pip-installed, don't modify)
 
-Located in `~/virtual_envs/lewm/lib/.../stable_worldmodel/`:
+Installed into the venv as `stable_worldmodel/`:
 
 | Component | What it does | Key API |
 |---|---|---|
@@ -35,7 +35,7 @@ Located in `~/virtual_envs/lewm/lib/.../stable_worldmodel/`:
 
 ### Ours — custom code
 
-Located in `~/Dropbox/code/world-model-audits/lewm/`:
+Located in `lewm/` in this repo:
 
 | File | What it does | Why custom |
 |---|---|---|

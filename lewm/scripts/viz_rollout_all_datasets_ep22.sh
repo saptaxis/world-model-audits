@@ -4,13 +4,14 @@
 # 20 episodes per dataset, seq_len sized to episode length at frameskip=10.
 set -e
 
-source ~/virtual_envs/lewm/bin/activate
-cd ~/Dropbox/code/world-model-audits
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "${REPO_ROOT}/env.sh"
+cd "${REPO_ROOT}"
 
-RUN_DIR=/media/hdd1/physics-priors-latent-space/lunar-lander-networks/lewm-runs/synthetic-all-fs10
+RUN_DIR=${WMA_LL_NETWORKS}/lewm-runs/synthetic-all-fs10
 MODEL=$RUN_DIR/lewm_lunarlander_synthetic_all_fs10_epoch_22_object.ckpt
 SH=$RUN_DIR/state_head_epoch22_all/state_head.pt
-CACHE=/home/vsr/vsr-tmp/lewm-datasets
+CACHE=${WMA_CACHE_DIR}
 OUTBASE=$RUN_DIR/rollout_viz_ep22
 GPU=${1:-1}
 N_EP=${2:-20}

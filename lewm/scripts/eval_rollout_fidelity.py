@@ -14,7 +14,7 @@ Usage:
                    lunarlander_synthetic_impulse-main_clean \\
                    lunarlander_synthetic_impulse-side_clean \\
         --action-norm-ref lunarlander_synthetic_heuristic_clean \\
-        --cache-dir /home/scad/vsr-tmp/lewm-datasets \\
+        --cache-dir $WMA_CACHE_DIR \\
         --output-dir /.../rollout_fidelity_epoch{N} \\
         --ctx-len 3 --n-preds 1 \\
         [--n-episodes 20] [--seq-len 20]
@@ -42,7 +42,7 @@ def main():
                         "and gets its own row in the output table. Required — no default "
                         "because networks train on different dataset mixes.")
     p.add_argument("--cache-dir", required=True,
-                   help="HDF5 cache dir (e.g. /home/scad/vsr-tmp/lewm-datasets).")
+                   help="HDF5 cache dir (e.g. $WMA_CACHE_DIR).")
     p.add_argument("--output-dir", required=True)
     p.add_argument("--ctx-len", type=int, required=True,
                    help="Training history_size. Required — must match the checkpoint.")

@@ -6,7 +6,7 @@ eval loop pattern as OnlineTrainer.eval() — no manual tensor construction.
 Usage:
     cd dreamerv3/vendor/r2dreamer
     python ../../../dreamerv3/scripts/eval_agent.py \
-        --logdir /media/hdd1/.../dreamerv3/s42 \
+        --logdir $WMA_DATA_ROOT/world-model-audit-runs/dreamerv3/s42 \
         --episodes 100
 """
 

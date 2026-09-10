@@ -13,6 +13,7 @@ Usage:
 """
 
 import argparse
+import os
 from pathlib import Path
 
 import numpy as np
@@ -31,7 +32,7 @@ def main():
     parser.add_argument("--model", required=True, help="LeWorldModel _object.ckpt")
     parser.add_argument("--state-head", required=True, help="Trained state_head.pt")
     parser.add_argument("--dataset", required=True, help="HDF5 dataset name to evaluate on")
-    parser.add_argument("--cache-dir", default="/home/vsr/vsr-tmp/lewm-datasets")
+    parser.add_argument("--cache-dir", default=os.environ.get("WMA_CACHE_DIR"))
     parser.add_argument("--max-frames", type=int, default=50000)
     parser.add_argument("--encode-batch-size", type=int, default=1024)
     parser.add_argument("--device", default="cuda")
@@ -45,7 +46,9 @@ def main():
     print(f"Loaded state head (trained R²={train_metrics['r2_mean']:.4f})")
 
     # Encode frames
-    output_path = f"/home/vsr/vsr-tmp/lewm-eval-cache/{args.dataset}_z.npz"
+    output_path = os.path.join(
+        os.environ.get("WMA_SCRATCH", "."),
+        "lewm-eval-cache", f"{args.dataset}_z.npz")
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
 
     if Path(output_path).exists():

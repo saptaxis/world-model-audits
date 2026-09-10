@@ -6,9 +6,9 @@ and emits a unified report.
 
 Usage:
     python lewm/scripts/eval_suite.py \\
-        --run-dir /media/hdd1/.../synthetic-all-clean-fs10-aux \\
+        --run-dir $WMA_LL_NETWORKS/lewm-runs/synthetic-all-clean-fs10-aux \\
         --epoch 1 \\
-        --cache-dir /home/scad/vsr-tmp/lewm-datasets \\
+        --cache-dir $WMA_CACHE_DIR \\
         [--include-clusters A B C D E]
         [--tests 1 3 5 9 10 11]
         [--skip-tests 3]

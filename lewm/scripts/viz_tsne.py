@@ -11,7 +11,7 @@ Usage:
     python lewm/scripts/viz_tsne.py \
         --model /path/to/lewm_object.ckpt \
         --dataset lunarlander_synthetic_heuristic \
-        --cache-dir ~/vsr-tmp/lewm-datasets \
+        --cache-dir $WMA_CACHE_DIR \
         --output-dir /path/to/tsne/ \
         --max-frames 10000
 
@@ -19,6 +19,7 @@ Produces one scatter plot per kinematic dimension + one colored by dataset sourc
 """
 
 import argparse
+import os
 from pathlib import Path
 
 import matplotlib
@@ -37,7 +38,7 @@ def main():
     parser.add_argument("--encoded-z", help="Path to encoded_z.npz (skips encoding)")
     parser.add_argument("--model", help="LeWorldModel _object.ckpt (if encoding needed)")
     parser.add_argument("--dataset", nargs="+", help="HDF5 dataset name(s)")
-    parser.add_argument("--cache-dir", default="/home/vsr/vsr-tmp/lewm-datasets")
+    parser.add_argument("--cache-dir", default=os.environ.get("WMA_CACHE_DIR"))
     parser.add_argument("--output-dir", required=True, help="Where to save plots")
     parser.add_argument("--max-frames", type=int, default=10000,
                         help="Max frames for t-SNE (subsample if more)")

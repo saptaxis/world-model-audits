@@ -80,8 +80,13 @@ def test_build_kinematic_from_paths(tmp_path):
     """Factory loads LeWM ckpt + state head pt, returns LeWMKinematic."""
     import os
 
-    model_ckpt = "/media/hdd1/physics-priors-latent-space/lunar-lander-networks/lewm-runs/synthetic-heuristic-fs10/lewm_lunarlander_synthetic_heuristic_fs10_epoch_30_object.ckpt"
-    sh_ckpt = "/media/hdd1/physics-priors-latent-space/lunar-lander-networks/lewm-runs/synthetic-heuristic-fs10/state_head_epoch30/state_head.pt"
+    networks = os.environ.get("WMA_LL_NETWORKS")
+    if not networks:
+        pytest.skip("WMA_LL_NETWORKS not set (see env.sh.example)")
+    run = os.path.join(networks, "lewm-runs", "synthetic-heuristic-fs10")
+    model_ckpt = os.path.join(
+        run, "lewm_lunarlander_synthetic_heuristic_fs10_epoch_30_object.ckpt")
+    sh_ckpt = os.path.join(run, "state_head_epoch30", "state_head.pt")
     if not (os.path.exists(model_ckpt) and os.path.exists(sh_ckpt)):
         pytest.skip("Heuristic ckpt not available")
     if not torch.cuda.is_available():

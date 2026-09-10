@@ -21,11 +21,12 @@ Usage:
         --model /path/to/lewm_object.ckpt \
         --state-head /path/to/state_head.pt \
         --dataset lunarlander_synthetic_heuristic \
-        --cache-dir ~/vsr-tmp/lewm-datasets \
+        --cache-dir $WMA_CACHE_DIR \
         --output-dir /path/to/run-dir/action_response_heuristic/ \
         --n-frames 200
 """
 import argparse
+import os
 import io
 import sys
 from pathlib import Path
@@ -135,7 +136,7 @@ def main():
                    help="Probe dataset name (NOT a list — single dataset for action-response "
                         "transitions). Required. Use the same dataset the training config "
                         "uses for the probe sample; typically one of the training datasets.")
-    p.add_argument("--cache-dir", default="/media/hdd1/physics-priors-latent-space/lunar-lander-data")
+    p.add_argument("--cache-dir", default=os.environ.get("WMA_CACHE_DIR") or os.environ.get("WMA_LL_DATA"))
     p.add_argument("--n-frames", type=int, default=200,
                    help="Number of test transitions")
     p.add_argument("--frameskip", type=int, default=10)

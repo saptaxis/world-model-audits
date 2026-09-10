@@ -7,13 +7,14 @@
 #   - 'random' excluded (dropped from training set per the clean+aux spec)
 set -e
 
-source ~/virtual_envs/lewm/bin/activate
-cd ~/Dropbox/code/world-model-audits
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "${REPO_ROOT}/env.sh"
+cd "${REPO_ROOT}"
 
-RUN_DIR=/media/hdd1/physics-priors-latent-space/lunar-lander-networks/lewm-runs/synthetic-all-clean-fs10-aux
+RUN_DIR=${WMA_LL_NETWORKS}/lewm-runs/synthetic-all-clean-fs10-aux
 MODEL=$RUN_DIR/lewm_lunarlander_synthetic_all_clean_fs10_aux_epoch_8_object.ckpt
 SH=$RUN_DIR/state_head_epoch8_all/state_head.pt
-CACHE=/home/vsr/vsr-tmp/lewm-datasets
+CACHE=${WMA_CACHE_DIR}
 OUTBASE=$RUN_DIR/rollout_viz_ep8
 GPU=${1:-1}
 N_EP=${2:-20}

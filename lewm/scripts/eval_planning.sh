@@ -21,7 +21,7 @@
 #     # Synthetic (kinematic) mode with iCEM
 #     bash lewm/scripts/eval_planning.sh synthetic \
 #         synthetic-heuristic-fs10/lewm_lunarlander_synthetic_heuristic_fs10_epoch_30 \
-#         /media/hdd1/physics-priors-latent-space/lunar-lander-networks/lewm-runs/synthetic-heuristic-fs10/state_head_epoch30/state_head.pt \
+#         "$WMA_LL_NETWORKS/lewm-runs/synthetic-heuristic-fs10/state_head_epoch30/state_head.pt" \
 #         icem
 set -e
 
@@ -31,11 +31,11 @@ STATE_HEAD=${3:-""}
 SOLVER=${4:-cem}
 shift $(( $# < 4 ? $# : 4 ))
 
-export STABLEWM_HOME=/media/hdd1/physics-priors-latent-space/lunar-lander-data
-export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
-
 # Resolve repo root dynamically so the script works both in scad and on host.
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "${REPO_ROOT}/env.sh"
+
+export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
 export PYTHONPATH=${REPO_ROOT}:${PYTHONPATH:-}
 
 cd "${REPO_ROOT}/lewm/vendor/le-wm"

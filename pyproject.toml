@@ -13,3 +13,6 @@ include = ["dreamerv3*", "lewm*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "integration: needs a real dataset, checkpoint or GPU; skips when absent",
+]

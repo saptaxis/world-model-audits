@@ -14,10 +14,11 @@ import lewm.env  # registers LunarLanderSynthetic-v0
 @pytest.mark.integration
 def test_reset_seed_matches_dataset_step_0():
     """Reset with ep_seed should produce state matching dataset's first row."""
-    h5_path = (
-        "/media/hdd1/physics-priors-latent-space/lunar-lander-data/datasets/"
-        "lunarlander_synthetic_heuristic.h5"
-    )
+    data_root = os.environ.get("WMA_LL_DATA")
+    if not data_root:
+        pytest.skip("WMA_LL_DATA not set (see env.sh.example)")
+    h5_path = os.path.join(data_root, "datasets",
+                           "lunarlander_synthetic_heuristic.h5")
     if not os.path.exists(h5_path):
         pytest.skip(f"dataset not available at {h5_path}")
     with h5py.File(h5_path, "r") as f:

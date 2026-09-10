@@ -12,11 +12,12 @@ Usage:
         --model /path/to/lewm_object.ckpt \
         --state-head /path/to/state_head.pt \
         --dataset lunarlander_synthetic_heuristic \
-        --cache-dir ~/vsr-tmp/lewm-datasets \
+        --cache-dir $WMA_CACHE_DIR \
         --n-episodes 20 --seq-len 15 \
         --output-dir /path/to/report/
 """
 import argparse
+import os
 import json
 import sys
 from pathlib import Path
@@ -123,7 +124,7 @@ def main():
     p.add_argument("--model", required=True)
     p.add_argument("--state-head", required=True)
     p.add_argument("--dataset", default="lunarlander_synthetic_heuristic")
-    p.add_argument("--cache-dir", default="/media/hdd1/physics-priors-latent-space/lunar-lander-data")
+    p.add_argument("--cache-dir", default=os.environ.get("WMA_CACHE_DIR") or os.environ.get("WMA_LL_DATA"))
     p.add_argument("--n-episodes", type=int, default=20)
     p.add_argument("--seq-len", type=int, default=15)
     p.add_argument("--frameskip", type=int, default=10)

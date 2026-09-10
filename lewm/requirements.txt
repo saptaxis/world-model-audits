@@ -1,5 +1,5 @@
 # LeWorldModel dependencies
-# Venv: ~/virtual_envs/lewm
+# Venv path is set as WMA_VENV in env.sh (see env.sh.example).
 
 # PyTorch — install with CUDA index first:
 # pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124

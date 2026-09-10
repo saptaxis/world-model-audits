@@ -3,12 +3,13 @@
 # CPU-only — runs in parallel, no GPU needed.
 set -e
 
-source ~/virtual_envs/lewm/bin/activate
-cd ~/Dropbox/code/world-model-audits
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "${REPO_ROOT}/env.sh"
+cd "${REPO_ROOT}"
 
-DATA=/media/hdd1/physics-priors-latent-space/lunar-lander-data/world_model_data/visual-gym-default-random-heuristic-prims
-OUT=/home/vsr/vsr-tmp/lewm-datasets/datasets
-LOGDIR=/home/vsr/vsr-tmp/lewm-synthetic-create-logs
+DATA=${WMA_LL_DATA}/world_model_data/visual-gym-default-random-heuristic-prims
+OUT=${WMA_CACHE_DIR}/datasets
+LOGDIR=${WMA_SCRATCH}/lewm-synthetic-create-logs
 mkdir -p "$LOGDIR"
 
 for dir in random free-fall ground-stationary ground-liftoff ground-side-thrust ground-thrust-sweep impulse-main impulse-side; do

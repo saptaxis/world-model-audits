@@ -1,21 +1,22 @@
 #!/bin/bash
 # Create 12 TRUNCATED synthetic (triangle) HDF5 datasets for the clean-data run.
 # Truncates each episode at first frame with y>1.5 or |x|>1.0. Drops episodes
-# with kept length < 15. Writes canonical outputs to /media/hdd1 and a merged
+# with kept length < 15. Writes canonical outputs under $WMA_LL_DATA and a merged
 # truncation_stats_clean.json next to them.
 #
 # `random` is deliberately excluded from this run.
 
 set -e
 
-source ~/virtual_envs/lewm/bin/activate
-cd ~/Dropbox/code/world-model-audits
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "${REPO_ROOT}/env.sh"
+cd "${REPO_ROOT}"
 
-DATA_ROOT=/media/hdd1/physics-priors-latent-space/lunar-lander-data/world_model_data
+DATA_ROOT=${WMA_LL_DATA}/world_model_data
 PRIMS_ROOT="$DATA_ROOT/visual-gym-default-random-heuristic-prims"
 AGENT_ROOT="$DATA_ROOT/gym-default"
-OUT=/media/hdd1/physics-priors-latent-space/lunar-lander-data/datasets
-LOGDIR=~/vsr-tmp/lewm-synthetic-clean-logs
+OUT=${WMA_LL_DATA}/datasets
+LOGDIR=${WMA_SCRATCH}/lewm-synthetic-clean-logs
 STATS_DIR="$LOGDIR/stats"
 
 mkdir -p "$OUT" "$LOGDIR" "$STATS_DIR"
@@ -98,4 +99,4 @@ echo "  $OUT/lunarlander_synthetic_*_clean.h5"
 echo "  $MERGED"
 echo ""
 echo "Next: copy to SSD training cache:"
-echo "  rsync -ahv --progress $OUT/lunarlander_synthetic_*_clean.h5 ~/vsr-tmp/lewm-datasets/datasets/"
+echo "  rsync -ahv --progress $OUT/lunarlander_synthetic_*_clean.h5 ${WMA_CACHE_DIR}/datasets/"
